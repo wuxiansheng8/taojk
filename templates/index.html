@@ -1,0 +1,938 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TAO 生态监控系统 PRO</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        :root {
+            --page-bg: radial-gradient(circle at top left, #dff7fb 0%, #eefbfd 28%, #f7fcfd 62%, #fbfeff 100%);
+            --surface: rgba(255, 255, 255, 0.92);
+            --surface-soft: rgba(244, 252, 252, 0.94);
+            --surface-strong: #e7f7f4;
+            --border: #d7ebe8;
+            --border-strong: #c5e5df;
+            --text: #173247;
+            --muted: #6d8793;
+            --accent: #15c4b1;
+            --accent-strong: #0f8f8a;
+            --accent-soft: rgba(21, 196, 177, 0.14);
+            --shadow: 0 22px 60px rgba(42, 92, 105, 0.12);
+        }
+
+        body {
+            background: var(--page-bg) !important;
+            color: var(--text) !important;
+        }
+
+        aside {
+            background: rgba(255, 255, 255, 0.82) !important;
+            border-right: 1px solid var(--border) !important;
+            box-shadow: 18px 0 40px rgba(54, 99, 112, 0.08);
+            backdrop-filter: blur(22px);
+        }
+
+        main {
+            background: transparent !important;
+        }
+
+        main > header {
+            background: transparent !important;
+            border-bottom: 1px solid rgba(215, 235, 232, 0.7) !important;
+        }
+
+        main > header h2,
+        aside h1,
+        aside .font-bold,
+        h3,
+        h4,
+        label,
+        button,
+        a,
+        span,
+        div {
+            letter-spacing: 0;
+        }
+
+        aside h1,
+        main > header h2,
+        h3,
+        h4,
+        .text-xl,
+        .text-lg,
+        .text-2xl {
+            color: var(--text) !important;
+        }
+
+        aside p,
+        [class*="text-gray-500"],
+        [class*="text-gray-400"] {
+            color: var(--muted) !important;
+        }
+
+        [class*="text-blue-300"],
+        [class*="text-blue-400"] {
+            color: var(--accent-strong) !important;
+        }
+
+        .sidebar-link {
+            color: var(--text) !important;
+            border: 1px solid transparent;
+            border-radius: 18px !important;
+            padding-top: 1.1rem !important;
+            padding-bottom: 1.1rem !important;
+            margin-bottom: 0.35rem;
+        }
+
+        .sidebar-link:hover {
+            background: rgba(255, 255, 255, 0.78) !important;
+            border-color: var(--border);
+            box-shadow: 0 10px 24px rgba(65, 115, 125, 0.08);
+        }
+
+        .sidebar-link.active {
+            background: linear-gradient(135deg, rgba(21, 196, 177, 0.18), rgba(21, 196, 177, 0.06)) !important;
+            border-left: 4px solid var(--accent) !important;
+            border-color: rgba(21, 196, 177, 0.18);
+            color: #0c6d69 !important;
+            box-shadow: inset 0 0 0 1px rgba(21, 196, 177, 0.08);
+        }
+
+        aside .bg-gray-900\/50 {
+            background: rgba(255, 255, 255, 0.76) !important;
+            border-top: 1px solid var(--border);
+            box-shadow: 0 -10px 30px rgba(58, 104, 116, 0.06);
+        }
+
+        aside .bg-gray-900\/50 .text-gray-400,
+        aside .bg-gray-900\/50 .text-gray-500 {
+            color: #6b8790 !important;
+        }
+
+        aside .bg-gray-900\/50 .text-red-400 {
+            color: #ff6f6a !important;
+        }
+
+        aside .bg-gray-900\/50 .text-blue-400 {
+            color: var(--accent-strong) !important;
+        }
+
+        section [class*="rounded-xl border"],
+        section [class*="rounded-lg border"],
+        section [class*="bg-gray-800"],
+        section [class*="bg-gray-900/40"],
+        section [class*="bg-gray-700/50"] {
+            background: var(--surface) !important;
+            border-color: var(--border) !important;
+            box-shadow: var(--shadow);
+        }
+
+        section [class*="bg-gray-900"],
+        section input,
+        section select,
+        section textarea {
+            background: var(--surface-soft) !important;
+            border-color: var(--border) !important;
+            color: var(--text) !important;
+        }
+
+        section input::placeholder,
+        section textarea::placeholder {
+            color: #9ab0ba !important;
+        }
+
+        button[class*="bg-blue-600"],
+        a[class*="bg-blue-600"] {
+            background: linear-gradient(135deg, var(--accent), #43d3b0) !important;
+            color: #ffffff !important;
+            box-shadow: 0 16px 34px rgba(21, 196, 177, 0.22);
+        }
+
+        button[class*="bg-gray-700"],
+        a[class*="bg-gray-700"] {
+            background: #eef8f7 !important;
+            color: var(--accent-strong) !important;
+            border: 1px solid var(--border) !important;
+        }
+
+        [class*="border-gray-700"] {
+            border-color: var(--border) !important;
+        }
+
+        [class*="bg-purple-900"] {
+            background: #eaf7fb !important;
+            color: #1483a0 !important;
+        }
+
+        [class*="bg-blue-900"] {
+            background: #e7f7f4 !important;
+            color: #0e8f89 !important;
+        }
+
+        input[type="checkbox"] {
+            accent-color: var(--accent);
+        }
+
+        .dashboard-stat-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 1.25rem;
+        }
+
+        .dashboard-stat-card {
+            min-height: 142px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .monitor-group {
+            overflow: hidden;
+            transition: transform 180ms ease;
+        }
+
+        .monitor-group:hover {
+            transform: translateY(-1px);
+        }
+
+        .monitor-group-header {
+            width: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            padding: 1.15rem 1.5rem;
+            background: rgba(255, 255, 255, 0.7);
+            cursor: pointer;
+        }
+
+        .monitor-group-body {
+            max-height: 0;
+            opacity: 0;
+            overflow: hidden;
+            transition: max-height 260ms ease, opacity 180ms ease, padding 180ms ease;
+            padding: 0 1.5rem;
+        }
+
+        .monitor-group.open .monitor-group-body {
+            max-height: 4200px;
+            opacity: 1;
+            padding: 2.75rem 2rem 2.25rem;
+        }
+
+        .monitor-group-chevron {
+            transition: transform 180ms ease;
+        }
+
+        .monitor-group.open .monitor-group-chevron {
+            transform: rotate(180deg);
+        }
+
+        .group-name-display {
+            cursor: text;
+        }
+
+        .group-name-input {
+            display: none;
+            min-width: 260px;
+        }
+
+        .group-name-editing .group-name-display {
+            display: none;
+        }
+
+        .group-name-editing .group-name-input {
+            display: block;
+        }
+
+        .wallet-list-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 1.15rem;
+            min-height: 220px;
+        }
+
+        .wallet-item {
+            min-height: 86px;
+            padding: 1rem 1.1rem;
+        }
+
+        .wallet-item .wallet-alias {
+            font-size: 1rem;
+            line-height: 1.4;
+        }
+
+        .wallet-item .wallet-address {
+            font-size: 0.82rem;
+            line-height: 1.45;
+        }
+
+        @media (max-width: 900px) {
+            .wallet-list-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 1280px) {
+            .dashboard-stat-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+        }
+
+        @media (max-width: 768px) {
+            .dashboard-stat-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-thumb { background: #b7dbd6; border-radius: 10px; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 flex h-screen overflow-hidden">
+
+    <!-- 侧边菜单栏 -->
+    <aside class="w-64 bg-gray-800 flex-shrink-0 flex flex-col border-r border-gray-700">
+        <div class="p-6">
+            <h1 class="text-xl font-bold flex items-center gap-2">
+                <i class="fas fa-microchip text-blue-500"></i> TAO MONITOR
+            </h1>
+            <p class="text-xs text-gray-500 mt-1">Enterprise Edition v2.0</p>
+        </div>
+
+        <nav class="flex-1 px-4 space-y-2 mt-4">
+            <a href="/" class="sidebar-link flex items-center gap-3 p-3 rounded transition-all hover:bg-gray-700 {% if page == 'dashboard' %}active{% endif %}">
+                <i class="fas fa-chart-line w-5 text-center"></i> 运行看板
+            </a>
+            <a href="/monitoring" class="sidebar-link flex items-center gap-3 p-3 rounded transition-all hover:bg-gray-700 {% if page == 'monitoring' %}active{% endif %}">
+                <i class="fas fa-link w-5 text-center"></i> 链上监控
+            </a>
+            <a href="/logs" class="sidebar-link flex items-center gap-3 p-3 rounded transition-all hover:bg-gray-700 {% if page == 'logs' %}active{% endif %}">
+                <i class="fas fa-list-ul w-5 text-center"></i> 运行日志
+            </a>
+            <a href="/audit" class="sidebar-link flex items-center gap-3 p-3 rounded transition-all hover:bg-gray-700 {% if page == 'audit' %}active{% endif %}">
+                <i class="fas fa-bell w-5 text-center"></i> 通知审计
+            </a>
+            <a href="/settings" class="sidebar-link flex items-center gap-3 p-3 rounded transition-all hover:bg-gray-700 {% if page == 'settings' %}active{% endif %}">
+                <i class="fas fa-cog w-5 text-center"></i> 系统设置
+            </a>
+        </nav>
+
+        <div class="p-4 bg-gray-900/50">
+            <div class="text-xs text-gray-400 mb-2">系统状态</div>
+            <div class="flex items-center gap-2 mb-1">
+                <div id="sidebar-status-dot" class="w-2 h-2 {% if status and status.wss_ok %}bg-green-500 animate-pulse{% else %}bg-red-500{% endif %} rounded-full"></div>
+                <span id="sidebar-status-text" class="text-sm">
+                    {% if status and status.wss_ok %}
+                    已连接: <span class="text-blue-400 font-mono">{{ uptime }}</span>
+                    {% else %}
+                    未连接
+                    {% endif %}
+                </span>
+            </div>
+            <a href="/logout" class="text-xs text-red-400 hover:underline mt-2 block"><i class="fas fa-sign-out-alt"></i> 退出登录</a>
+        </div>
+    </aside>
+
+    <!-- 主内容区 -->
+    <main class="flex-1 flex flex-col overflow-hidden">
+        <header class="h-16 bg-gray-800 border-b border-gray-700 flex items-center px-8 justify-between">
+            <h2 class="font-bold text-lg">
+                {% if page == 'dashboard' %}系统运行看板{% endif %}
+                {% if page == 'monitoring' %}链上监控配置{% endif %}
+                {% if page == 'logs' %}运行日志 (近24小时){% endif %}
+                {% if page == 'audit' %}通知审计日志{% endif %}
+                {% if page == 'settings' %}系统环境设置{% endif %}
+            </h2>
+            <div class="flex items-center gap-3">
+                <a href="/export_wallets" class="text-sm bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded flex items-center gap-2">
+                    <i class="fas fa-file-export"></i> 导出数据
+                </a>
+                <button type="button" onclick="document.getElementById('wallet-import-input').click()" class="text-sm bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded flex items-center gap-2">
+                    <i class="fas fa-file-import"></i> 导入数据
+                </button>
+                <a href="/wallet_template" class="text-sm bg-emerald-600 hover:bg-emerald-700 px-3 py-1.5 rounded flex items-center gap-2">
+                    <i class="fas fa-file-arrow-down"></i> 模板下载
+                </a>
+                <form id="wallet-import-form" action="/import_wallets" method="POST" enctype="multipart/form-data" class="hidden">
+                    <input id="wallet-import-input" type="file" name="file" accept=".txt,text/plain" onchange="document.getElementById('wallet-import-form').submit()">
+                </form>
+            </div>
+        </header>
+
+        <section class="flex-1 overflow-y-auto p-8">
+            {% if status %}
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+                <div class="bg-gray-800 border border-gray-700 rounded-lg p-4">
+                    <div class="text-xs text-gray-400 mb-2">WSS 连接</div>
+                    <div id="wss-status-label" class="flex items-center gap-2 font-bold {% if status.wss_ok %}text-green-400{% else %}text-red-400{% endif %}">
+                        <span id="wss-status-dot" class="w-2 h-2 rounded-full {% if status.wss_ok %}bg-green-500{% else %}bg-red-500{% endif %}"></span>
+                        <span id="wss-status-text">{{ status.wss_label }}</span>
+                    </div>
+                    <div id="wss-status-detail" class="text-xs text-gray-500 mt-2 truncate" title="{{ status.wss_detail }}">{{ status.wss_detail }}</div>
+                </div>
+                <div class="bg-gray-800 border border-gray-700 rounded-lg p-4">
+                    <div class="text-xs text-gray-400 mb-2">最近扫描</div>
+                    <div id="scan-status-label" class="font-bold text-blue-400">{{ status.last_scan_label }}</div>
+                    <div id="scan-status-detail" class="text-xs text-gray-500 mt-2">{{ status.last_scan_detail }}</div>
+                </div>
+                <div class="bg-gray-800 border border-gray-700 rounded-lg p-4">
+                    <div class="text-xs text-gray-400 mb-2">Telegram</div>
+                    <div id="tg-status-label" class="flex items-center gap-2 font-bold {% if status.tg_ok %}text-green-400{% else %}text-yellow-400{% endif %}">
+                        <span id="tg-status-dot" class="w-2 h-2 rounded-full {% if status.tg_ok %}bg-green-500{% else %}bg-yellow-500{% endif %}"></span>
+                        <span id="tg-status-text">{{ status.tg_label }}</span>
+                    </div>
+                    <div id="tg-status-detail" class="text-xs text-gray-500 mt-2 truncate" title="{{ status.tg_detail }}">{{ status.tg_detail }}</div>
+                </div>
+            </div>
+            {% endif %}
+
+            {% if page == 'dashboard' %}
+            <!-- 运行看板 -->
+            <div class="grid grid-cols-1 gap-8">
+                <div class="bg-gray-800 p-6 rounded-xl border border-gray-700">
+                    <h3 class="font-bold mb-4 flex items-center gap-2">
+                        <i class="fas fa-heartbeat text-red-500"></i> 24小时WSS 可用率看板
+                    </h3>
+                    <div class="flex flex-wrap items-center justify-between gap-4 mb-4 text-sm text-gray-500">
+                        <div>
+                            最近 24 小时WSS 可用率
+                            <span class="ml-2 text-lg font-bold text-emerald-500">{{ status.uptime_rate if status else 0 }}%</span>
+                        </div>
+                        <div class="flex items-center gap-4 text-xs">
+                            <span class="flex items-center gap-2"><span class="w-3 h-3 rounded bg-emerald-500 inline-block"></span>在线</span>
+                            <span class="flex items-center gap-2"><span class="w-3 h-3 rounded bg-rose-500 inline-block"></span>离线</span>
+                        </div>
+                    </div>
+                    <div class="h-56 w-full">
+                        <canvas id="uptimeChart"></canvas>
+                    </div>
+                </div>
+
+                <div class="dashboard-stat-grid">
+                    <div class="dashboard-stat-card bg-gray-800 p-6 rounded-xl border border-gray-700">
+                        <div class="text-gray-400 text-sm">当前状态</div>
+                        <div class="text-2xl font-bold {% if status and status.wss_ok %}text-green-500{% else %}text-red-500{% endif %} mt-1">
+                            {% if status and status.wss_ok %}运行中{% else %}未连接{% endif %}
+                        </div>
+                    </div>
+                    <div class="dashboard-stat-card bg-gray-800 p-6 rounded-xl border border-gray-700">
+                        <div class="text-gray-400 text-sm">WSS 延迟</div>
+                        <div class="text-2xl font-bold text-blue-400 mt-1"><span id="ping-val">{{ status.wss_latency_ms if status and status.wss_latency_ms else "--" }}</span> ms</div>
+                    </div>
+                    <div class="dashboard-stat-card bg-gray-800 p-6 rounded-xl border border-gray-700">
+                        <div class="text-gray-400 text-sm">累计监控笔数</div>
+                        <div class="text-2xl font-bold text-purple-400 mt-1">{{ status.notification_count if status else 0 }}</div>
+                    </div>
+                    <div class="dashboard-stat-card bg-gray-800 p-6 rounded-xl border border-gray-700">
+                        <div class="text-gray-400 text-sm">TG 推送成功率</div>
+                        <div class="text-2xl font-bold {% if status and status.tg_delivery_rate >= 95 %}text-green-500{% elif status and status.tg_delivery_rate >= 80 %}text-yellow-500{% else %}text-red-500{% endif %} mt-1">
+                            {{ status.tg_delivery_rate if status else 0 }}%
+                        </div>
+                        <div class="text-xs text-gray-500 mt-2">最近 24 小时成功 {{ status.tg_delivery_sent if status else 0 }} / {{ status.tg_delivery_total if status else 0 }}</div>
+                    </div>
+                </div>
+            </div>
+
+            <script>
+                const uptimePoints = {{ uptime_points | tojson }};
+                const uptimeChartEl = document.getElementById('uptimeChart');
+                if (uptimeChartEl) {
+                    const bucketMs = 30 * 60 * 1000;
+                    const grouped = [];
+                    for (const point of uptimePoints) {
+                        const bucketStart = Math.floor((point.timestamp * 1000) / bucketMs) * bucketMs;
+                        let bucket = grouped.find((item) => item.start === bucketStart);
+                        if (!bucket) {
+                            bucket = { start: bucketStart, values: [] };
+                            grouped.push(bucket);
+                        }
+                        bucket.values.push(point.status);
+                    }
+
+                    const labels = grouped.map((bucket) => {
+                        const d = new Date(bucket.start + 8 * 60 * 60 * 1000);
+                        const hour = String(d.getUTCHours()).padStart(2, '0');
+                        const minute = String(d.getUTCMinutes()).padStart(2, '0');
+                        return `${hour}:${minute}`;
+                    });
+                    const buckets = grouped.map((bucket) => {
+                        const onlineCount = bucket.values.reduce((sum, val) => sum + (val === 1 ? 1 : 0), 0);
+                        return bucket.values.length ? +(onlineCount / bucket.values.length * 100).toFixed(2) : 0;
+                    });
+
+                    new Chart(uptimeChartEl.getContext('2d'), {
+                        type: 'line',
+                        data: {
+                            labels,
+                            datasets: [{
+                                label: '在线率',
+                                data: buckets,
+                                borderColor: '#14b8a6',
+                                backgroundColor: 'rgba(20, 184, 166, 0.18)',
+                                borderWidth: 3,
+                                pointRadius: 0,
+                                pointHoverRadius: 4,
+                                fill: true,
+                                stepped: true,
+                                tension: 0,
+                            }]
+                        },
+                        options: {
+                            maintainAspectRatio: false,
+                            plugins: {
+                                legend: { display: false },
+                                tooltip: {
+                                    mode: 'index',
+                                    intersect: false,
+                                    callbacks: {
+                                        title: (items) => {
+                                            if (!items.length) return '';
+                                            const start = items[0].label;
+                                            const [hour, minute] = start.split(':').map(Number);
+                                            const endHour = minute === 30 ? hour + 1 : hour;
+                                            const endMinute = minute === 30 ? '00' : '30';
+                                            const paddedHour = String(endHour % 24).padStart(2, '0');
+                                            return `${start} - ${paddedHour}:${endMinute}`;
+                                        },
+                                        label: (context) => `在线率 ${context.parsed.y}%`
+                                    }
+                                }
+                            },
+                            interaction: {
+                                mode: 'index',
+                                intersect: false
+                            },
+                            scales: {
+                                y: {
+                                    min: 0,
+                                    max: 100,
+                                    grid: { color: 'rgba(148, 163, 184, 0.14)' },
+                                    ticks: {
+                                        color: '#64748b',
+                                        callback: (value) => `${value}%`
+                                    }
+                                },
+                                x: {
+                                    grid: { display: false },
+                                    ticks: {
+                                        color: '#64748b',
+                                        maxRotation: 0,
+                                        autoSkip: true,
+                                        maxTicksLimit: 12
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            </script>
+            {% endif %}
+
+            {% if page == 'monitoring' %}
+            <!-- 链上监控 -->
+            <div class="space-y-8">
+                <!-- 添加分组 -->
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-xl font-bold">监控分组列表</h3>
+                    <button onclick="document.getElementById('addGroupModal').classList.remove('hidden')" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded flex items-center gap-2">
+                        <i class="fas fa-plus"></i> 新增分组
+                    </button>
+                </div>
+
+                {% for g in groups %}
+                <div class="monitor-group bg-gray-800 rounded-xl border border-gray-700 mb-6 {% if open_group and open_group|int == g.id %}open{% elif not open_group and loop.first %}open{% endif %}">
+                    <button type="button" class="monitor-group-header" onclick="toggleMonitorGroup(this)">
+                        <div class="flex items-center gap-3">
+                            <span class="px-2 py-1 rounded text-xs {% if g.type == 'whale' %}bg-purple-900 text-purple-200{% else %}bg-blue-900 text-blue-200{% endif %}">
+                                {{ "巨鲸预警" if g.type == "whale" else "钱包监控" }}
+                            </span>
+                            <div class="group-name-wrap" ondblclick="startGroupNameEdit(event, {{ g.id }})">
+                                <h4 class="group-name-display font-bold">{{ g.name }}</h4>
+                                <form action="/group/rename/{{ g.id }}" method="POST" class="group-name-input">
+                                    <input type="text" name="name" value="{{ g.name }}" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500" onkeydown="handleGroupNameKeydown(event)" onblur="submitGroupNameEdit(this)">
+                                </form>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-4">
+                            <span class="text-xs text-gray-500">{{ g.wallets|length }} 个钱包</span>
+                            <span class="monitor-group-chevron text-gray-500"><i class="fas fa-chevron-down"></i></span>
+                        </div>
+                    </button>
+
+                    <div class="monitor-group-body">
+                    <div class="grid grid-cols-1 gap-10">
+                        <!-- 分组配置 -->
+                        <form action="/group/update/{{ g.id }}" method="POST" class="space-y-4">
+                            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                                <div class="space-y-4">
+                                    <div>
+                                        <label class="block text-xs text-gray-400 mb-1">Telegram Bot Token（主）</label>
+                                        <input type="password" name="tg_token" value="{{ g.tg_token or '' }}" class="w-full bg-gray-900 border border-gray-700 rounded p-2 text-sm focus:outline-none focus:border-blue-500">
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs text-gray-400 mb-1">Chat ID（主）</label>
+                                        <input type="text" name="tg_chat_id" value="{{ g.tg_chat_id or '' }}" class="w-full bg-gray-900 border border-gray-700 rounded p-2 text-sm focus:outline-none focus:border-blue-500">
+                                    </div>
+                                </div>
+                                <div class="space-y-4">
+                                    <div>
+                                        <label class="block text-xs text-gray-400 mb-1">Telegram Bot Token（热备）</label>
+                                        <input type="password" name="tg_token_backup" value="{{ g.tg_token_backup or '' }}" class="w-full bg-gray-900 border border-gray-700 rounded p-2 text-sm focus:outline-none focus:border-blue-500">
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs text-gray-400 mb-1">Chat ID（热备）</label>
+                                        <input type="text" name="tg_chat_id_backup" value="{{ g.tg_chat_id_backup or '' }}" class="w-full bg-gray-900 border border-gray-700 rounded p-2 text-sm focus:outline-none focus:border-blue-500">
+                                    </div>
+                                </div>
+                            </div>
+                            <label class="flex items-center justify-between gap-4 bg-gray-900 border border-gray-700 rounded p-3">
+                                <span>
+                                    <span class="block text-sm font-bold">开启加减仓消息分离</span>
+                                    <span class="block text-xs text-gray-500 mt-1">开启后主机器人发加仓，热备机器人发减仓。</span>
+                                </span>
+                                <input type="checkbox" name="split_stake_bots" value="1" {% if g.split_stake_bots %}checked{% endif %} class="w-5 h-5 accent-blue-600">
+                            </label>
+                            {% if g.type == 'whale' %}
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">大额触发阈值 (TAO)</label>
+                                <input type="number" step="0.1" name="threshold_tao" value="{{ g.threshold_tao }}" class="w-full bg-gray-900 border border-gray-700 rounded p-2 text-sm focus:outline-none focus:border-blue-500">
+                            </div>
+                            {% endif %}
+                            <div class="flex justify-end">
+                                <a href="/test_tg/{{ g.id }}" class="text-xs text-blue-400 hover:underline">测试TG机器人</a>
+                            </div>
+                            <button type="submit" class="w-full bg-gray-700 hover:bg-gray-600 text-sm py-2 rounded transition-colors">保存分组设置</button>
+                        </form>
+
+                        <!-- 监控名单 -->
+                        <div class="flex flex-col h-full">
+                            <div class="flex justify-between items-center mb-3">
+                                <span class="text-xs text-gray-400">监控名单 (不论金额必推)</span>
+                                <button onclick="openAddWalletModal({{ g.id }})" class="text-xs text-blue-400 hover:underline">+ 添加钱包</button>
+                            </div>
+                            <div class="flex flex-col md:flex-row gap-3 md:items-center md:justify-between mb-4">
+                                <input type="text" placeholder="搜索钱包备注或地址" class="wallet-search w-full md:max-w-md bg-gray-900 border border-gray-700 rounded p-2 text-sm focus:outline-none focus:border-blue-500" oninput="filterWallets(this)">
+                                <span class="text-xs text-gray-500">双列展示，钱包多时更容易找</span>
+                            </div>
+                            <div class="wallet-list-grid flex-1 bg-gray-900 rounded border border-gray-700 p-4">
+                                {% for w in g.wallets %}
+                                <div class="wallet-item flex justify-between items-center bg-gray-800 rounded text-xs">
+                                    <div class="flex flex-col">
+                                        <span class="wallet-alias font-bold">{{ w.alias }}</span>
+                                        <span class="wallet-address text-gray-500 font-mono">{{ w.address[:10] }}...{{ w.address[-4:] }}</span>
+                                    </div>
+                                    <div class="flex items-center gap-3">
+                                        <a href="/wallet/toggle/{{ w.id }}/{{ 0 if w.is_active else 1 }}">
+                                            <div class="w-8 h-4 {% if w.is_active %}bg-blue-600{% else %}bg-gray-600{% endif %} rounded-full relative">
+                                                <div class="w-3 h-3 bg-white rounded-full absolute top-0.5 transition-all {% if w.is_active %}right-0.5{% else %}left-0.5{% endif %}"></div>
+                                            </div>
+                                        </a>
+                                        <a href="/wallet/delete/{{ w.id }}" onclick="return confirm('确认删除这个钱包吗？删除后不会再监控。')" class="text-red-500 hover:text-red-400" title="删除钱包"><i class="fas fa-trash"></i></a>
+                                    </div>
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+
+            <!-- 模态框: 新增分组 -->
+            <div id="addGroupModal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+                <div class="bg-gray-800 p-8 rounded-xl border border-gray-700 w-96">
+                    <h4 class="text-xl font-bold mb-6">新增监控分组</h4>
+                    <form action="/group/add" method="POST" class="space-y-4">
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-1">分组名称</label>
+                            <input type="text" name="name" placeholder="例如：大户监控、二级市场跟单" class="w-full bg-gray-900 border border-gray-700 rounded p-2 focus:outline-none" required>
+                        </div>
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-1">监控类型</label>
+                            <select name="type" class="w-full bg-gray-900 border border-gray-700 rounded p-2 focus:outline-none">
+                                <option value="whale">巨鲸预警 (基于阈值)</option>
+                                <option value="wallet">钱包监控 (特定地址)</option>
+                            </select>
+                        </div>
+                        <div class="flex gap-4 pt-4">
+                            <button type="button" onclick="document.getElementById('addGroupModal').classList.add('hidden')" class="flex-1 bg-gray-700 py-2 rounded">取消</button>
+                            <button type="submit" class="flex-1 bg-blue-600 py-2 rounded">确认创建</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- 模态框: 新增钱包 -->
+            <div id="addWalletModal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+                <div class="bg-gray-800 p-8 rounded-xl border border-gray-700 w-96">
+                    <h4 class="text-xl font-bold mb-6">添加监控钱包</h4>
+                    <form action="/wallet/add" method="POST" class="space-y-4">
+                        <input type="hidden" name="group_id" id="modal_group_id">
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-1">钱包备注</label>
+                            <input type="text" name="alias" placeholder="例如：某大户A" class="w-full bg-gray-900 border border-gray-700 rounded p-2 focus:outline-none" required>
+                        </div>
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-1">钱包地址 (SS58格式)</label>
+                            <input type="text" name="address" placeholder="5..." class="w-full bg-gray-900 border border-gray-700 rounded p-2 focus:outline-none" required>
+                        </div>
+                        <div class="flex gap-4 pt-4">
+                            <button type="button" onclick="document.getElementById('addWalletModal').classList.add('hidden')" class="flex-1 bg-gray-700 py-2 rounded">取消</button>
+                            <button type="submit" class="flex-1 bg-blue-600 py-2 rounded">确认添加</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <script>
+                function openAddWalletModal(groupId) {
+                    document.getElementById('modal_group_id').value = groupId;
+                    document.getElementById('addWalletModal').classList.remove('hidden');
+                }
+
+                function toggleMonitorGroup(button) {
+                    const group = button.closest('.monitor-group');
+                    if (!group) return;
+                    group.classList.toggle('open');
+                }
+
+                function startGroupNameEdit(event, groupId) {
+                    event.stopPropagation();
+                    const wrap = event.currentTarget;
+                    wrap.classList.add('group-name-editing');
+                    const input = wrap.querySelector('input[name="name"]');
+                    if (!input) return;
+                    input.focus();
+                    input.select();
+                }
+
+                function handleGroupNameKeydown(event) {
+                    if (event.key === 'Enter') {
+                        event.preventDefault();
+                        submitGroupNameEdit(event.target);
+                    } else if (event.key === 'Escape') {
+                        const wrap = event.target.closest('.group-name-wrap');
+                        if (wrap) wrap.classList.remove('group-name-editing');
+                    }
+                }
+
+                function submitGroupNameEdit(input) {
+                    const form = input.closest('form');
+                    const wrap = input.closest('.group-name-wrap');
+                    if (!form || !wrap) return;
+                    wrap.classList.remove('group-name-editing');
+                    if (!input.value.trim()) return;
+                    form.submit();
+                }
+
+                function filterWallets(input) {
+                    const group = input.closest('.monitor-group-body');
+                    if (!group) return;
+                    const keyword = input.value.trim().toLowerCase();
+                    const items = group.querySelectorAll('.wallet-item');
+                    items.forEach((item) => {
+                        const text = item.textContent.toLowerCase();
+                        item.style.display = !keyword || text.includes(keyword) ? '' : 'none';
+                    });
+                }
+            </script>
+            {% endif %}
+
+            {% if page == 'logs' %}
+            <div class="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
+                <div class="p-4 bg-gray-700/50 flex justify-between items-center">
+                    <span class="text-sm font-bold">实时运行日志</span>
+                    <span class="text-xs text-gray-400 italic">自动保留最近24小时日志</span>
+                </div>
+                <div class="p-4 h-[600px] overflow-y-auto font-mono text-xs space-y-1">
+                    {% for l in logs %}
+                    <div class="flex gap-4 p-1 hover:bg-gray-700/30">
+                        <span class="text-gray-500">{{ l.created_at_bj or l.created_at }}</span>
+                        <span class="font-bold {% if l.level == 'ERROR' %}text-red-500{% elif l.level == 'WARN' %}text-yellow-500{% else %}text-green-500{% endif %}">[{{ l.level }}]</span>
+                        <span class="text-gray-300">{{ l.message }}</span>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+
+            {% if page == 'audit' %}
+            <div class="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
+                <div class="p-4 bg-gray-700/50 flex justify-between items-center">
+                    <span class="text-sm font-bold">通知审计日志</span>
+                    <span class="text-xs text-gray-400 italic">记录最近 100 条 TG 推送原因与发送状态</span>
+                </div>
+                <div class="p-4 h-[600px] overflow-y-auto text-xs space-y-3">
+                    {% for a in audit_logs %}
+                    <div class="border border-gray-700 rounded-lg p-3 bg-gray-900/40">
+                        <div class="flex flex-wrap gap-3 text-gray-400 mb-2">
+                            <span>{{ a.created_at_bj or a.created_at }}</span>
+                            <span class="font-bold {% if a.send_status == 'sent' %}text-green-400{% elif a.send_status == 'queued' or a.send_status == 'retrying' %}text-yellow-400{% else %}text-red-400{% endif %}">{{ a.send_status }}</span>
+                            <span>{{ a.group_name }} / {{ a.group_type }}</span>
+                            <span>{{ a.action }}</span>
+                            {% if a.tx_ref %}<span>交易 {{ a.tx_ref }}</span>{% endif %}
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-gray-300">
+                            <div>地址: {{ a.address or '-' }}</div>
+                            <div>别名: {{ a.alias or '-' }}</div>
+                            <div>金额: {{ '%.4f'|format(a.amount) if a.amount is not none else '-' }} {{ a.unit or '' }}</div>
+                            <div>阈值金额: {{ '%.4f'|format(a.threshold_amount) if a.threshold_amount is not none else '-' }}</div>
+                            <div>子网: {{ a.netuid or '-' }}</div>
+                            <div>热钱包/详情: {{ a.detail or '-' }}</div>
+                            <div>来自: {{ a.from_address or '-' }}</div>
+                            <div>到达: {{ a.to_address or '-' }}</div>
+                            <div class="md:col-span-2 break-all">Hash: {{ a.tx_hash or '-' }}</div>
+                            {% if a.error_message %}<div class="md:col-span-2 text-red-400 break-all">错误: {{ a.error_message }}</div>{% endif %}
+                            <div class="md:col-span-2 whitespace-pre-wrap break-words text-gray-400">{{ a.message }}</div>
+                        </div>
+                    </div>
+                    {% else %}
+                    <div class="text-gray-400">还没有通知审计记录。</div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+
+            {% if page == 'settings' %}
+            <div class="max-w-5xl mx-auto space-y-8">
+                <div class="bg-gray-800 p-8 rounded-xl border border-gray-700">
+                    <h3 class="text-xl font-bold mb-6 border-b border-gray-700 pb-4">系统环境与网络设置</h3>
+                    <form action="/save_settings" method="POST" class="space-y-6">
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                            <div class="space-y-6">
+                                <div class="text-sm font-bold text-blue-300 border-b border-gray-700 pb-3">Dwellir WSS</div>
+                                <div>
+                                    <label class="block text-sm font-bold mb-2">主接口</label>
+                                    <div class="flex gap-3">
+                                        <input type="text" name="dwellir_wss" value="{{ settings.dwellir_wss }}" class="flex-1 bg-gray-900 border border-gray-700 rounded p-3 text-sm focus:border-blue-500 focus:outline-none shadow-inner">
+                                        <button type="button" onclick="testWssEndpoint('primary')" class="shrink-0 bg-gray-700 hover:bg-gray-600 px-4 py-3 rounded text-sm font-bold">测试</button>
+                                    </div>
+                                    <p class="text-xs text-gray-500 mt-2">填写 Dwellir 后台给你的 Mainnet WSS 链接。</p>
+                                    <p id="primary-test-result" class="text-xs mt-2 text-gray-400"></p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-bold mb-2">备用接口</label>
+                                    <div class="flex gap-3">
+                                        <input type="text" name="dwellir_wss_backup" value="{{ settings.dwellir_wss_backup }}" placeholder="wss://..." class="flex-1 bg-gray-900 border border-gray-700 rounded p-3 text-sm focus:border-blue-500 focus:outline-none shadow-inner">
+                                        <button type="button" onclick="testWssEndpoint('backup')" class="shrink-0 bg-gray-700 hover:bg-gray-600 px-4 py-3 rounded text-sm font-bold">测试</button>
+                                    </div>
+                                    <p class="text-xs text-gray-500 mt-2">主接口连不上时会自动尝试备用接口。</p>
+                                    <p id="backup-test-result" class="text-xs mt-2 text-gray-400"></p>
+                                </div>
+                            </div>
+                            <div class="space-y-6">
+                                <div class="text-sm font-bold text-blue-300 border-b border-gray-700 pb-3">连接策略与 Telegram</div>
+                                <label class="flex items-center justify-between gap-4 bg-gray-900 border border-gray-700 rounded p-3">
+                                    <span>
+                                        <span class="block text-sm font-bold">开启负载均衡</span>
+                                        <span class="block text-xs text-gray-500 mt-1">开启后主接口和备用接口会轮流连接。</span>
+                                    </span>
+                                    <input type="checkbox" name="wss_load_balance" value="1" {% if settings.wss_load_balance == "1" %}checked{% endif %} class="w-5 h-5 accent-blue-600">
+                                </label>
+                                <div>
+                                    <label class="block text-sm font-bold mb-2">推送间隔 (毫秒)</label>
+                                    <input type="number" name="tg_throttle_ms" value="{{ settings.tg_throttle_ms }}" class="w-full bg-gray-900 border border-gray-700 rounded p-3 text-sm focus:border-blue-500 focus:outline-none shadow-inner">
+                                    <p class="text-xs text-gray-500 mt-2">当短时间内交易量激增时，此参数可防止触发 TG 的 429 报错。</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="pt-4">
+                            <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg transition-all shadow-lg">保存设置</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+            {% endif %}
+
+        </section>
+    </main>
+
+    <script>
+        const setClasses = (el, classes) => {
+            if (!el) return;
+            el.className = classes;
+        };
+
+        async function refreshStatusCards() {
+            try {
+                const res = await fetch('/api/status', { cache: 'no-store' });
+                if (!res.ok) return;
+                const status = await res.json();
+
+                const wssLabel = document.getElementById('wss-status-label');
+                const wssDot = document.getElementById('wss-status-dot');
+                const wssText = document.getElementById('wss-status-text');
+                const wssDetail = document.getElementById('wss-status-detail');
+                const sidebarDot = document.getElementById('sidebar-status-dot');
+                const sidebarText = document.getElementById('sidebar-status-text');
+
+                setClasses(wssLabel, `flex items-center gap-2 font-bold ${status.wss_ok ? 'text-green-400' : 'text-red-400'}`);
+                setClasses(wssDot, `w-2 h-2 rounded-full ${status.wss_ok ? 'bg-green-500' : 'bg-red-500'}`);
+                setClasses(sidebarDot, `w-2 h-2 rounded-full ${status.wss_ok ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`);
+                if (wssText) wssText.textContent = status.wss_label;
+                if (wssDetail) {
+                    wssDetail.textContent = status.wss_detail;
+                    wssDetail.title = status.wss_detail;
+                }
+                if (sidebarText) {
+                    sidebarText.innerHTML = status.wss_ok
+                        ? `已连接: <span class="text-blue-400 font-mono">${status.uptime}</span>`
+                        : '未连接';
+                }
+
+                const scanLabel = document.getElementById('scan-status-label');
+                const scanDetail = document.getElementById('scan-status-detail');
+                if (scanLabel) scanLabel.textContent = status.last_scan_label;
+                if (scanDetail) scanDetail.textContent = status.last_scan_detail;
+
+                const pingVal = document.getElementById('ping-val');
+                if (pingVal) pingVal.textContent = status.wss_latency_ms ? status.wss_latency_ms : '--';
+
+                const tgLabel = document.getElementById('tg-status-label');
+                const tgDot = document.getElementById('tg-status-dot');
+                const tgText = document.getElementById('tg-status-text');
+                const tgDetail = document.getElementById('tg-status-detail');
+                setClasses(tgLabel, `flex items-center gap-2 font-bold ${status.tg_ok ? 'text-green-400' : 'text-yellow-400'}`);
+                setClasses(tgDot, `w-2 h-2 rounded-full ${status.tg_ok ? 'bg-green-500' : 'bg-yellow-500'}`);
+                if (tgText) tgText.textContent = status.tg_label;
+                if (tgDetail) {
+                    tgDetail.textContent = status.tg_detail;
+                    tgDetail.title = status.tg_detail;
+                }
+            } catch (err) {
+                // 页面保持当前状态，下一秒继续尝试。
+            }
+        }
+
+        async function testWssEndpoint(slot) {
+            const resultEl = document.getElementById(`${slot}-test-result`);
+            if (!resultEl) return;
+            resultEl.textContent = '测试中...';
+            resultEl.className = 'text-xs mt-2 text-gray-400';
+
+            try {
+                const res = await fetch(`/api/test_wss/${slot}`, { cache: 'no-store' });
+                const data = await res.json();
+                if (data.ok) {
+                    resultEl.textContent = `连接成功，延迟 ${data.latency_ms} ms`;
+                    resultEl.className = 'text-xs mt-2 text-green-400';
+                } else {
+                    resultEl.textContent = `连接失败: ${data.error || '未知错误'}`;
+                    resultEl.className = 'text-xs mt-2 text-red-400 break-all';
+                }
+            } catch (err) {
+                resultEl.textContent = `连接失败: ${err}`;
+                resultEl.className = 'text-xs mt-2 text-red-400 break-all';
+            }
+        }
+
+        refreshStatusCards();
+        setInterval(refreshStatusCards, 1000);
+    </script>
+</body>
+</html>

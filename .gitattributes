@@ -1,0 +1,5 @@
+*.sh text eol=lf
+requirements.txt text eol=lf
+*.py text working-tree-encoding=UTF-8 eol=lf
+*.html text eol=lf
+*.md text eol=lf
