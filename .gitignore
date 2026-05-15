@@ -1,5 +1,7 @@
 # 忽略数据库文件，防止覆盖用户数据
 data.db
+data.db-wal
+data.db-shm
 # 忽略环境变量文件（包含密码和配置）
 .env
 # 忽略Python缓存

@@ -249,10 +249,7 @@ async def settings_page(request: Request):
 @app.post("/group/add")
 async def add_group(request: Request, name: str = Form(...), type: str = Form(...)):
     check_login(request)
-    conn = db.get_db()
-    conn.execute("INSERT INTO monitor_groups (name, type) VALUES (?, ?)", (name, type))
-    conn.commit()
-    conn.close()
+    db.execute_write("INSERT INTO monitor_groups (name, type) VALUES (?, ?)", (name, type))
     return RedirectResponse("/monitoring", status_code=303)
 
 @app.post("/group/update/{id}")
@@ -267,8 +264,7 @@ async def update_group(
     threshold_tao: float = Form(5.0),
 ):
     check_login(request)
-    conn = db.get_db()
-    conn.execute(
+    db.execute_write(
         """
         UPDATE monitor_groups
         SET tg_token=?, tg_chat_id=?, tg_token_backup=?, tg_chat_id_backup=?, split_stake_bots=?, threshold_tao=?
@@ -284,48 +280,40 @@ async def update_group(
             id,
         )
     )
-    conn.commit()
-    conn.close()
     return RedirectResponse(f"/monitoring?open_group={id}", status_code=303)
 
 @app.post("/group/rename/{id}")
 async def rename_group(request: Request, id: int, name: str = Form(...)):
     check_login(request)
-    conn = db.get_db()
-    conn.execute("UPDATE monitor_groups SET name=? WHERE id=?", (name.strip(), id))
-    conn.commit()
-    conn.close()
+    db.execute_write("UPDATE monitor_groups SET name=? WHERE id=?", (name.strip(), id))
     return RedirectResponse(f"/monitoring?open_group={id}", status_code=303)
 
 @app.post("/wallet/add")
 async def add_wallet(request: Request, group_id: int = Form(...), address: str = Form(...), alias: str = Form(...)):
     check_login(request)
-    conn = db.get_db()
-    conn.execute("INSERT INTO wallets (group_id, address, alias) VALUES (?, ?, ?)", (group_id, address.strip(), alias.strip()))
-    conn.commit()
-    conn.close()
+    db.execute_write("INSERT INTO wallets (group_id, address, alias) VALUES (?, ?, ?)", (group_id, address.strip(), alias.strip()))
     return RedirectResponse(f"/monitoring?open_group={group_id}", status_code=303)
 
 @app.get("/wallet/toggle/{id}/{state}")
 async def toggle_wallet(request: Request, id: int, state: int):
     check_login(request)
-    conn = db.get_db()
-    wallet = conn.execute("SELECT group_id FROM wallets WHERE id=?", (id,)).fetchone()
-    conn.execute("UPDATE wallets SET is_active=? WHERE id=?", (state, id))
-    conn.commit()
-    conn.close()
-    group_id = wallet["group_id"] if wallet else ""
+    def operation(conn):
+        wallet = conn.execute("SELECT group_id FROM wallets WHERE id=?", (id,)).fetchone()
+        conn.execute("UPDATE wallets SET is_active=? WHERE id=?", (state, id))
+        return wallet["group_id"] if wallet else ""
+
+    group_id = db.execute_write_returning(operation)
     return RedirectResponse(f"/monitoring?open_group={group_id}")
 
 @app.get("/wallet/delete/{id}")
 async def del_wallet(request: Request, id: int):
     check_login(request)
-    conn = db.get_db()
-    wallet = conn.execute("SELECT group_id FROM wallets WHERE id=?", (id,)).fetchone()
-    conn.execute("DELETE FROM wallets WHERE id=?", (id,))
-    conn.commit()
-    conn.close()
-    group_id = wallet["group_id"] if wallet else ""
+    def operation(conn):
+        wallet = conn.execute("SELECT group_id FROM wallets WHERE id=?", (id,)).fetchone()
+        conn.execute("DELETE FROM wallets WHERE id=?", (id,))
+        return wallet["group_id"] if wallet else ""
+
+    group_id = db.execute_write_returning(operation)
     return RedirectResponse(f"/monitoring?open_group={group_id}")
 
 @app.post("/save_settings")
@@ -420,8 +408,7 @@ async def import_wallets(request: Request, file: UploadFile = File(...)):
     text = raw.decode("utf-8")
     parsed_groups = parse_wallet_txt(text)
 
-    conn = db.get_db()
-    try:
+    def operation(conn):
         for parsed_group in parsed_groups:
             existing_group = conn.execute(
                 "SELECT * FROM monitor_groups WHERE name = ? AND type = ?",
@@ -451,9 +438,8 @@ async def import_wallets(request: Request, file: UploadFile = File(...)):
                         "INSERT INTO wallets (group_id, address, alias) VALUES (?, ?, ?)",
                         (group_id, wallet["address"], wallet["alias"])
                     )
-        conn.commit()
-    finally:
-        conn.close()
+
+    db.execute_write_returning(operation)
 
     return RedirectResponse("/monitoring", status_code=303)
 

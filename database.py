@@ -5,15 +5,53 @@ from passlib.context import CryptContext
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 DB_PATH = os.path.join(os.path.dirname(__file__), 'data.db')
+DB_TIMEOUT_SECONDS = 30
+DB_BUSY_TIMEOUT_MS = 30000
+DB_RETRY_DELAYS = (0.2, 0.5, 1.0, 2.0)
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT_SECONDS)
     conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
+
+def _is_locked_error(error):
+    return "database is locked" in str(error).lower() or "database table is locked" in str(error).lower()
+
+def _run_write(operation):
+    last_error = None
+    for attempt, delay in enumerate((0, *DB_RETRY_DELAYS)):
+        if delay:
+            time.sleep(delay)
+        conn = get_db()
+        try:
+            result = operation(conn)
+            conn.commit()
+            return result
+        except sqlite3.OperationalError as e:
+            conn.rollback()
+            last_error = e
+            if not _is_locked_error(e) or attempt >= len(DB_RETRY_DELAYS):
+                raise
+        finally:
+            conn.close()
+    raise last_error
+
+def execute_write(sql, params=()):
+    def operation(conn):
+        conn.execute(sql, params)
+
+    _run_write(operation)
+
+def execute_write_returning(operation):
+    return _run_write(operation)
 
 def init_db():
     conn = get_db()
     c = conn.cursor()
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
 
     # 1. 监控分组表 (每个组可以有不同的机器人和阈值)
     c.execute('''
@@ -114,21 +152,21 @@ def init_db():
 # --- 日志与监控逻辑 ---
 
 def add_log(level, message):
-    conn = get_db()
-    conn.execute("INSERT INTO system_logs (level, message) VALUES (?, ?)", (level, message))
-    # 自动清理24小时前的日志
-    conn.execute("DELETE FROM system_logs WHERE created_at < datetime('now', '-1 day')")
-    conn.commit()
-    conn.close()
+    def operation(conn):
+        conn.execute("INSERT INTO system_logs (level, message) VALUES (?, ?)", (level, message))
+        # 自动清理24小时前的日志
+        conn.execute("DELETE FROM system_logs WHERE created_at < datetime('now', '-1 day')")
+
+    _run_write(operation)
 
 def record_uptime(status):
-    conn = get_db()
-    now_min = int(time.time() / 60) * 60
-    conn.execute("INSERT OR REPLACE INTO uptime_history (timestamp, status) VALUES (?, ?)", (now_min, status))
-    # 只保留最近24小时的数据 (1440分钟)
-    conn.execute("DELETE FROM uptime_history WHERE timestamp < ?", (now_min - 86400,))
-    conn.commit()
-    conn.close()
+    def operation(conn):
+        now_min = int(time.time() / 60) * 60
+        conn.execute("INSERT OR REPLACE INTO uptime_history (timestamp, status) VALUES (?, ?)", (now_min, status))
+        # 只保留最近24小时的数据 (1440分钟)
+        conn.execute("DELETE FROM uptime_history WHERE timestamp < ?", (now_min - 86400,))
+
+    _run_write(operation)
 
 def get_uptime_data():
     conn = get_db()
@@ -163,11 +201,12 @@ def get_uptime_series():
 # --- 基础配置管理 (原有逻辑适配) ---
 
 def create_admin_user(username, plain_password):
-    conn = get_db()
     hashed_pwd = pwd_context.hash(plain_password)
-    conn.execute("INSERT OR REPLACE INTO users (username, password_hash) VALUES (?, ?)", (username, hashed_pwd))
-    conn.commit()
-    conn.close()
+
+    def operation(conn):
+        conn.execute("INSERT OR REPLACE INTO users (username, password_hash) VALUES (?, ?)", (username, hashed_pwd))
+
+    _run_write(operation)
 
 def verify_user(username, plain_password):
     conn = get_db()
@@ -182,10 +221,10 @@ def get_setting(key, default=""):
     return row['value'] if row else default
 
 def set_setting(key, value):
-    conn = get_db()
-    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
-    conn.commit()
-    conn.close()
+    def operation(conn):
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+
+    _run_write(operation)
 
 def get_groups():
     conn = get_db()
@@ -210,50 +249,49 @@ def get_wallet_by_group_and_address(group_id, address):
     return dict(row) if row else None
 
 def add_notification_audit_log(entry):
-    conn = get_db()
-    conn.execute(
-        '''
-        INSERT INTO notification_audit_logs (
-            group_id, group_name, group_type, action, address, from_address, to_address,
-            alias, amount, unit, netuid, detail, threshold_amount, received_tao,
-            tx_ref, tx_hash, message, send_status, error_message
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''',
-        (
-            entry.get("group_id"),
-            entry.get("group_name"),
-            entry.get("group_type"),
-            entry.get("action"),
-            entry.get("address"),
-            entry.get("from_address"),
-            entry.get("to_address"),
-            entry.get("alias"),
-            entry.get("amount"),
-            entry.get("unit"),
-            entry.get("netuid"),
-            entry.get("detail"),
-            entry.get("threshold_amount"),
-            entry.get("received_tao"),
-            entry.get("tx_ref"),
-            entry.get("tx_hash"),
-            entry.get("message"),
-            entry.get("send_status", "queued"),
-            entry.get("error_message"),
+    def operation(conn):
+        conn.execute(
+            '''
+            INSERT INTO notification_audit_logs (
+                group_id, group_name, group_type, action, address, from_address, to_address,
+                alias, amount, unit, netuid, detail, threshold_amount, received_tao,
+                tx_ref, tx_hash, message, send_status, error_message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                entry.get("group_id"),
+                entry.get("group_name"),
+                entry.get("group_type"),
+                entry.get("action"),
+                entry.get("address"),
+                entry.get("from_address"),
+                entry.get("to_address"),
+                entry.get("alias"),
+                entry.get("amount"),
+                entry.get("unit"),
+                entry.get("netuid"),
+                entry.get("detail"),
+                entry.get("threshold_amount"),
+                entry.get("received_tao"),
+                entry.get("tx_ref"),
+                entry.get("tx_hash"),
+                entry.get("message"),
+                entry.get("send_status", "queued"),
+                entry.get("error_message"),
+            )
         )
-    )
-    audit_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    conn.commit()
-    conn.close()
-    return audit_id
+        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    return _run_write(operation)
 
 def update_notification_audit_log(audit_id, send_status, error_message=""):
-    conn = get_db()
-    conn.execute(
-        "UPDATE notification_audit_logs SET send_status = ?, error_message = ? WHERE id = ?",
-        (send_status, error_message, audit_id)
-    )
-    conn.commit()
-    conn.close()
+    def operation(conn):
+        conn.execute(
+            "UPDATE notification_audit_logs SET send_status = ?, error_message = ? WHERE id = ?",
+            (send_status, error_message, audit_id)
+        )
+
+    _run_write(operation)
 
 def get_notification_audit_logs(limit=100):
     conn = get_db()
