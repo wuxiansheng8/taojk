@@ -39,6 +39,8 @@ LAST_ERROR = ""
 CURRENT_WSS_LABEL = ""
 LAST_WSS_LATENCY_MS = 0
 WSS_INDEX = 0
+LAST_TG_SUCCESS_TIME = 0
+LAST_TG_ERROR = ""
 
 
 def get_wss_targets():
@@ -647,95 +649,168 @@ def send_telegram_msg_to_group(group_id, msg, audit_id=None, reply_markup=None, 
     return True
 
 
-def tg_worker():
+def _safe_tg_throttle_ms():
+    raw_value = db.get_setting("tg_throttle_ms", "500")
+    try:
+        return max(0, int(raw_value))
+    except (TypeError, ValueError):
+        db.add_log("WARN", f"TG 推送间隔配置无效({raw_value})，已临时使用 500ms")
+        return 500
+
+
+def _safe_retry_after(value):
+    try:
+        return max(1, int(float(value)))
+    except (TypeError, ValueError):
+        return 5
+
+
+def _load_tg_target(group_id, bot_token=None, chat_id=None):
+    conn = db.get_db()
+    group = conn.execute(
+        "SELECT tg_token, tg_chat_id, tg_token_backup, tg_chat_id_backup, split_stake_bots FROM monitor_groups WHERE id = ?",
+        (group_id,)
+    ).fetchone()
+    conn.close()
+
+    if not group:
+        return None, None, None, f"监控分组不存在: {group_id}"
+
+    bot_token = bot_token or group["tg_token"]
+    chat_id = chat_id or group["tg_chat_id"]
+    if not bot_token or not chat_id:
+        return group, bot_token, chat_id, "Bot Token 或 Chat ID 为空"
+
+    return group, bot_token, chat_id, ""
+
+
+def _update_migrated_chat_id(group_id, group, old_chat_id, migrated_chat_id):
+    conn = db.get_db()
+    if str(old_chat_id) == str(group["tg_chat_id"]):
+        conn.execute("UPDATE monitor_groups SET tg_chat_id = ? WHERE id = ?", (str(migrated_chat_id), group_id))
+    elif group["tg_chat_id_backup"] and str(old_chat_id) == str(group["tg_chat_id_backup"]):
+        conn.execute("UPDATE monitor_groups SET tg_chat_id_backup = ? WHERE id = ?", (str(migrated_chat_id), group_id))
+    conn.commit()
+    conn.close()
+
+
+def send_telegram_msg_to_group_now(group_id, msg, audit_id=None, reply_markup=None, bot_token=None, chat_id=None, allow_retry=True):
+    global LAST_SEND_TIME, LAST_TG_SUCCESS_TIME, LAST_TG_ERROR
+
+    group, bot_token, chat_id, error = _load_tg_target(group_id, bot_token, chat_id)
+    if error:
+        LAST_TG_ERROR = error
+        if audit_id:
+            db.update_notification_audit_log(audit_id, "failed", error)
+        db.add_log("ERROR", f"TG 发送失败: {error}")
+        return False, error
+
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": msg,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+
+    try:
+        res = requests.post(url, json=payload, timeout=10)
+        LAST_SEND_TIME = time.time()
+    except Exception as e:
+        error = str(e)
+        LAST_TG_ERROR = error
+        if audit_id:
+            db.update_notification_audit_log(audit_id, "failed", error[:500])
+        db.add_log("ERROR", f"TG 网络异常: {error}")
+        return False, error
+
+    if res.status_code == 429:
+        try:
+            retry_after = _safe_retry_after(res.json().get("parameters", {}).get("retry_after", 5))
+        except Exception:
+            retry_after = 5
+        error = f"429 retry_after={retry_after}"
+        LAST_TG_ERROR = error
+        if audit_id:
+            db.update_notification_audit_log(audit_id, "retrying" if allow_retry else "failed", error)
+        db.add_log("WARN", f"TG 频率限制，等待 {retry_after} 秒")
+        return False, error
+
+    if not res.ok:
+        migrate_to_chat_id = None
+        try:
+            migrate_to_chat_id = res.json().get("parameters", {}).get("migrate_to_chat_id")
+        except Exception:
+            migrate_to_chat_id = None
+
+        if migrate_to_chat_id and allow_retry:
+            _update_migrated_chat_id(group_id, group, chat_id, migrate_to_chat_id)
+            if audit_id:
+                db.update_notification_audit_log(audit_id, "retrying", f"migrate_to_chat_id={migrate_to_chat_id}")
+            db.add_log("WARN", f"TG 群升级为超级群，自动切换 Chat ID -> {migrate_to_chat_id}")
+            return send_telegram_msg_to_group_now(
+                group_id,
+                msg,
+                audit_id=audit_id,
+                reply_markup=reply_markup,
+                bot_token=bot_token,
+                chat_id=str(migrate_to_chat_id),
+                allow_retry=False,
+            )
+
+        error = res.text[:500]
+        LAST_TG_ERROR = error
+        if audit_id:
+            db.update_notification_audit_log(audit_id, "failed", error)
+        db.add_log("ERROR", f"TG 发送失败: {error}")
+        return False, error
+
+    LAST_TG_ERROR = ""
+    LAST_TG_SUCCESS_TIME = time.time()
+    if audit_id:
+        db.update_notification_audit_log(audit_id, "sent", "")
+    return True, ""
+
+
+def _process_tg_queue_item(item):
     global LAST_SEND_TIME
+
+    throttle_ms = _safe_tg_throttle_ms()
+    elapsed = (time.time() - LAST_SEND_TIME) * 1000
+    if elapsed < throttle_ms:
+        time.sleep((throttle_ms - elapsed) / 1000)
+
+    ok, error = send_telegram_msg_to_group_now(
+        item["group_id"],
+        item["msg"],
+        audit_id=item.get("audit_id"),
+        reply_markup=item.get("reply_markup"),
+        bot_token=item.get("bot_token"),
+        chat_id=item.get("chat_id"),
+    )
+    if not ok and error.startswith("429 retry_after="):
+        retry_after = _safe_retry_after(error.split("=", 1)[1] or 5)
+        time.sleep(retry_after)
+        TG_QUEUE.put(item)
+
+
+def tg_worker():
+    global LAST_TG_ERROR
     while True:
         item = TG_QUEUE.get()
-        group_id = item["group_id"]
-        msg = item["msg"]
-        audit_id = item.get("audit_id")
-        reply_markup = item.get("reply_markup")
-        bot_token = item.get("bot_token")
-        chat_id = item.get("chat_id")
-
-        conn = db.get_db()
-        group = conn.execute(
-            "SELECT tg_token, tg_chat_id, tg_token_backup, tg_chat_id_backup, split_stake_bots FROM monitor_groups WHERE id = ?",
-            (group_id,)
-        ).fetchone()
-        conn.close()
-
-        if not group:
-            TG_QUEUE.task_done()
-            continue
-
-        if not bot_token:
-            bot_token = group["tg_token"]
-        if not chat_id:
-            chat_id = group["tg_chat_id"]
-
-        if not bot_token or not chat_id:
-            TG_QUEUE.task_done()
-            continue
-
-        throttle_ms = int(db.get_setting("tg_throttle_ms", "500"))
-        elapsed = (time.time() - LAST_SEND_TIME) * 1000
-        if elapsed < throttle_ms:
-            time.sleep((throttle_ms - elapsed) / 1000)
-
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        payload = {
-            "chat_id": chat_id,
-            "text": msg,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-        }
-        if reply_markup:
-            payload["reply_markup"] = reply_markup
-
         try:
-            res = requests.post(url, json=payload, timeout=10)
-            LAST_SEND_TIME = time.time()
-            if res.status_code == 429:
-                if audit_id:
-                    db.update_notification_audit_log(audit_id, "retrying", f"429 retry_after={res.json().get('parameters', {}).get('retry_after', 5)}")
-                retry_after = res.json().get("parameters", {}).get("retry_after", 5)
-                db.add_log("WARN", f"TG 频率限制，等待 {retry_after} 秒")
-                time.sleep(retry_after)
-                TG_QUEUE.put(item)
-            elif not res.ok:
-                migrate_to_chat_id = None
-                try:
-                    migrate_to_chat_id = res.json().get("parameters", {}).get("migrate_to_chat_id")
-                except Exception:
-                    migrate_to_chat_id = None
-                if migrate_to_chat_id:
-                    conn = db.get_db()
-                    if chat_id == group["tg_chat_id"]:
-                        conn.execute("UPDATE monitor_groups SET tg_chat_id = ? WHERE id = ?", (str(migrate_to_chat_id), group_id))
-                    elif group["tg_chat_id_backup"] and str(chat_id) == str(group["tg_chat_id_backup"]):
-                        conn.execute("UPDATE monitor_groups SET tg_chat_id_backup = ? WHERE id = ?", (str(migrate_to_chat_id), group_id))
-                    conn.commit()
-                    conn.close()
-                    item["chat_id"] = str(migrate_to_chat_id)
-                    if audit_id:
-                        db.update_notification_audit_log(audit_id, "retrying", f"migrate_to_chat_id={migrate_to_chat_id}")
-                    db.add_log("WARN", f"TG 群升级为超级群，自动切换 Chat ID -> {migrate_to_chat_id}")
-                    TG_QUEUE.put(item)
-                    TG_QUEUE.task_done()
-                    continue
-                if audit_id:
-                    db.update_notification_audit_log(audit_id, "failed", res.text[:500])
-                db.add_log("ERROR", f"TG 发送失败: {res.text}")
-            else:
-                if audit_id:
-                    db.update_notification_audit_log(audit_id, "sent", "")
+            _process_tg_queue_item(item)
         except Exception as e:
+            error = str(e)
+            LAST_TG_ERROR = error
+            audit_id = item.get("audit_id") if isinstance(item, dict) else None
             if audit_id:
-                db.update_notification_audit_log(audit_id, "failed", str(e)[:500])
-            db.add_log("ERROR", f"TG 网络异常: {str(e)}")
-
-        TG_QUEUE.task_done()
+                db.update_notification_audit_log(audit_id, "failed", error[:500])
+            db.add_log("ERROR", f"TG Worker 异常: {error}")
+        finally:
+            TG_QUEUE.task_done()
 
 
 def build_alert_message(

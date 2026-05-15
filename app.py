@@ -2,6 +2,7 @@
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 from fastapi import FastAPI, Request, Form, Depends, HTTPException, status, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -74,7 +75,11 @@ def get_runtime_status():
         last_scan_label = "暂无扫描"
         last_scan_detail = "启动后收到新区块才会显示"
 
-    if latest_tg_error:
+    if scanner.LAST_TG_ERROR:
+        tg_label = "Telegram 推送异常"
+        tg_ok = False
+        tg_detail = scanner.LAST_TG_ERROR
+    elif latest_tg_error:
         tg_label = "Telegram 推送异常"
         tg_ok = False
         tg_detail = latest_tg_error["message"]
@@ -113,6 +118,7 @@ def get_runtime_status():
         "tg_delivery_rate": tg_delivery["rate"],
         "tg_delivery_total": tg_delivery["total"],
         "tg_delivery_sent": tg_delivery["sent_total"],
+        "tg_queue_size": scanner.TG_QUEUE.qsize(),
     }
 
 def check_login(request: Request):
@@ -334,8 +340,12 @@ async def save_sys_settings(request: Request, dwellir_wss: str = Form(...), dwel
 @app.get("/test_tg/{group_id}")
 async def test_tg(request: Request, group_id: int):
     check_login(request)
-    success = scanner.send_telegram_msg_to_group(group_id, "🔔 <b>测试通知</b>\n该分组机器人配置正确！")
-    return RedirectResponse("/monitoring?msg=" + ("Success" if success else "Failed"))
+    success, error = scanner.send_telegram_msg_to_group_now(group_id, "🔔 <b>测试通知</b>\n该分组机器人配置正确！", allow_retry=False)
+    if success:
+        return RedirectResponse(f"/monitoring?open_group={group_id}&msg=Success", status_code=303)
+    error_text = str(error or "Unknown error").replace("\n", " ")[:160]
+    safe_error = quote(f"Failed: {error_text}")
+    return RedirectResponse(f"/monitoring?open_group={group_id}&msg={safe_error}", status_code=303)
 
 @app.get("/backup")
 async def backup():
