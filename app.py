@@ -288,6 +288,12 @@ async def rename_group(request: Request, id: int, name: str = Form(...)):
     db.execute_write("UPDATE monitor_groups SET name=? WHERE id=?", (name.strip(), id))
     return RedirectResponse(f"/monitoring?open_group={id}", status_code=303)
 
+@app.post("/group/delete/{id}")
+async def delete_group(request: Request, id: int):
+    check_login(request)
+    db.execute_write("DELETE FROM monitor_groups WHERE id=?", (id,))
+    return RedirectResponse("/monitoring", status_code=303)
+
 @app.post("/wallet/add")
 async def add_wallet(request: Request, group_id: int = Form(...), address: str = Form(...), alias: str = Form(...)):
     check_login(request)
