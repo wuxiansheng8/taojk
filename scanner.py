@@ -826,19 +826,54 @@ def build_alert_message(
     received_tao=None,
     tx_ref=None,
     tx_hash=None,
+    alias_address=None,
+    alias_from=None,
+    alias_to=None,
+    group_type=None,
 ):
     if action == TEXT["transfer"]:
-        msg = f"<b>{safe_text(title)}</b>\n"
-        msg += f"<b>{safe_text(action)}</b>\n"
-        msg += f"{amount:.4f} {unit}\n"
-        msg += f"From: <code>{safe_text(from_address)}</code>\n"
-        msg += f"To: <code>{safe_text(to_address)}</code>\n"
-        return msg
+        if group_type == "wallet":
+            msg = f"<b>{safe_text(action)}</b>\n"
+            msg += f"{amount:.4f} {unit}\n"
+            alias = alias_from or alias_to or ""
+            if alias:
+                msg += f" 备注：{safe_text(alias)}\n"
+            msg += f"From: <code>{safe_text(from_address)}</code>\n"
+            msg += f"To: <code>{safe_text(to_address)}</code>\n"
+            return msg
+        else:
+            msg = f"<b>{safe_text(title)}</b>\n"
+            msg += f"<b>{safe_text(action)}</b>\n"
+            msg += f"{amount:.4f} {unit}\n"
+            msg += f"From: <code>{safe_text(from_address)}</code>\n"
+            msg += f"To: <code>{safe_text(to_address)}</code>\n"
+            return msg
 
     icon = "🟢" if action == TEXT["add_stake"] else "🔴"
     if action == TEXT["move_stake"]:
         icon = "🟡"
 
+    # 钱包监控组的自定义格式（无空行，带备注）
+    if group_type == "wallet":
+        msg = f"{icon} <b>{safe_text(action)} SN{safe_text(format_netuid(netuid))}</b>\n"
+        if received_tao is not None:
+            msg += f"{icon} Swap {received_tao:.4f} TAO\n"
+        else:
+            msg += f"{icon} Swap {amount:.4f} {unit}\n"
+
+        if alias_address:
+            msg += f" 备注：{safe_text(alias_address)}\n"
+
+        msg += f"🏠 操作者: <code>{safe_text(short_address(address))}</code>\n"
+        if detail:
+            msg += f"🔥 热钱包: <code>{safe_text(short_address(detail))}</code>\n"
+            
+        msg += f"📍 子网{safe_text(format_netuid(netuid))} "
+        if tx_ref:
+            msg += f"🔎 区块: <code>{safe_text(tx_ref)}</code>\n"
+        return msg
+
+    # 巨鲸组保持不变
     msg = f"{icon} <b>{safe_text(action)} SN{safe_text(format_netuid(netuid))}</b>\n"
     if received_tao is not None:
         msg += f"{icon} Swap {received_tao:.4f} TAO\n\n"
@@ -904,6 +939,10 @@ def check_and_alert(
         else:
             continue
 
+        alias_address = active_wallets.get(address) if address else None
+        alias_from = active_wallets.get(from_address) if from_address else None
+        alias_to = active_wallets.get(to_address) if to_address else None
+
         msg = build_alert_message(
             title,
             action,
@@ -917,6 +956,10 @@ def check_and_alert(
             received_tao=received_tao,
             tx_ref=tx_ref,
             tx_hash=tx_hash,
+            alias_address=alias_address,
+            alias_from=alias_from,
+            alias_to=alias_to,
+            group_type=group.get("type"),
         )
         reply_markup = None
         if action != TEXT["transfer"]:
