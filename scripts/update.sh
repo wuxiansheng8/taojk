@@ -23,6 +23,12 @@ fi
 ./venv/bin/pip install -r requirements.txt
 
 if systemctl list-unit-files taomonitor.service >/dev/null 2>&1; then
+  SERVICE_FILE="/etc/systemd/system/taomonitor.service"
+  if [ -f "$SERVICE_FILE" ] && ! grep -q "SESSION_SECRET" "$SERVICE_FILE"; then
+    echo "🔒 检测到系统服务配置中缺失 SESSION_SECRET，正在安全注入自动生成的密钥..."
+    NEW_SECRET=$(python3 -c "import secrets; print(secrets.token_urlsafe(48))")
+    sed -i '/\[Service\]/a Environment="SESSION_SECRET='"$NEW_SECRET"'"' "$SERVICE_FILE"
+  fi
   echo "正在重启 taomonitor 服务..."
   systemctl daemon-reload
   systemctl restart taomonitor
