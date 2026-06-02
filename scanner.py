@@ -2,11 +2,10 @@ import html
 import queue
 import threading
 import time
+import os
 from urllib.parse import urlparse, urlunparse
-
 import requests
 from substrateinterface import SubstrateInterface
-
 import database as db
 
 RAO_DECIMALS = 1e9
@@ -30,7 +29,11 @@ TEXT = {
     "move_stake": "换仓",
 }
 
-TG_QUEUE = queue.Queue()
+# --- 限制队列边界与运行控制变量 ---
+TG_QUEUE = queue.Queue(maxsize=1000)
+IS_RUNNING = False
+ACTIVE_SUBSTRATE = None  # 全局活跃连接实例，用于优雅停机
+
 LAST_SEND_TIME = 0
 LAST_CONNECT_TIME = 0
 LAST_BLOCK_TIME = 0
@@ -41,7 +44,45 @@ LAST_WSS_LATENCY_MS = 0
 WSS_INDEX = 0
 LAST_TG_SUCCESS_TIME = 0
 LAST_TG_ERROR = ""
+CONSECUTIVE_HANDLER_ERRORS = 0  # 追踪处理连续错误的次数
 
+# --- 跨平台文件排他锁实现 (扫描进程单例保护) ---
+_lock_file = None
+
+def acquire_lock():
+    global _lock_file
+    lock_path = os.path.join(os.path.dirname(db.DB_PATH), "scanner.lock")
+    try:
+        # Unix/Linux 平台
+        import fcntl
+        _lock_file = open(lock_path, "w")
+        fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except (ImportError, IOError):
+        try:
+            # Windows 平台
+            import msvcrt
+            _lock_file = open(lock_path, "w")
+            msvcrt.locking(_lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            return True
+        except (ImportError, IOError):
+            # 抢占锁失败或平台不支持
+            if _lock_file:
+                try:
+                    _lock_file.close()
+                except Exception:
+                    pass
+                _lock_file = None
+            return False
+
+def release_lock():
+    global _lock_file
+    if _lock_file:
+        try:
+            _lock_file.close()
+        except Exception:
+            pass
+        _lock_file = None
 
 def get_wss_targets():
     primary = db.get_setting("dwellir_wss", "wss://api-bittensor-mainnet.n.dwellir.com").strip()
@@ -58,19 +99,13 @@ def get_wss_targets():
 
     return targets, load_balance
 
-
 def pick_wss_target():
-    global WSS_INDEX
     targets, load_balance = get_wss_targets()
-
-    if load_balance and len(targets) > 1:
-        target = targets[WSS_INDEX % len(targets)]
-    else:
-        target = targets[WSS_INDEX % len(targets)]
-
-    WSS_INDEX += 1
-    return target
-
+    if not targets:
+        return "主接口", "wss://api-bittensor-mainnet.n.dwellir.com", False
+    
+    target = targets[WSS_INDEX % len(targets)]
+    return target[0], target[1], load_balance
 
 def normalize_wss_url(url):
     url = (url or "").strip()
@@ -84,7 +119,6 @@ def normalize_wss_url(url):
         return urlunparse(parsed._replace(scheme="ws"))
     return url
 
-
 def test_wss_endpoint(url):
     normalized_url = normalize_wss_url(url)
     start = time.perf_counter()
@@ -93,10 +127,8 @@ def test_wss_endpoint(url):
     latency_ms = int((time.perf_counter() - start) * 1000)
     return {"url": normalized_url, "latency_ms": latency_ms}
 
-
 def raw_value(value):
     return getattr(value, "value", value)
-
 
 def decoded_value(value):
     if hasattr(value, "decode"):
@@ -106,28 +138,23 @@ def decoded_value(value):
             pass
     return raw_value(value)
 
-
 def object_attr(value, name, default=None):
     if isinstance(value, dict):
         return value.get(name, default)
     return getattr(value, name, default)
 
-
 def format_tao(rao_amount):
     return float(rao_amount) / RAO_DECIMALS
-
 
 def to_float_tao(rao_amount):
     if rao_amount is None:
         return None
     return format_tao(rao_amount)
 
-
 def safe_text(value):
     if value is None:
         return ""
     return html.escape(str(value))
-
 
 def short_address(address):
     address = str(address or "")
@@ -135,12 +162,10 @@ def short_address(address):
         return address
     return f"{address[:4]}...{address[-4:]}"
 
-
 def extrinsic_url(tx_ref):
     if not tx_ref:
         return ""
     return f"https://taostats.io/extrinsic/{tx_ref}"
-
 
 def subnet_url(netuid):
     if netuid is None:
@@ -149,16 +174,13 @@ def subnet_url(netuid):
         return ""
     return f"https://taostats.io/subnets/{netuid}"
 
-
 def profile_url(address):
     if not address:
         return ""
     return f"https://backprop.finance/dtao/profile/{address}"
 
-
 def build_inline_keyboard(tx_ref=None, netuid=None, address=None):
     buttons = []
-
     subnet_link = subnet_url(netuid)
     profile_link = profile_url(address)
 
@@ -172,7 +194,6 @@ def build_inline_keyboard(tx_ref=None, netuid=None, address=None):
 
     return {"inline_keyboard": [buttons]}
 
-
 def normalize_address(value):
     value = raw_value(value)
     if isinstance(value, str):
@@ -183,24 +204,19 @@ def normalize_address(value):
                 return normalize_address(value[key])
     return str(value) if value is not None else ""
 
-
 def is_root_netuid(netuid):
     return str(netuid) == "0"
 
-
 def format_netuid(value):
     return "未提供" if value is None or value == "" else str(value)
-
 
 def call_arg_map(call):
     call = raw_value(call) or {}
     return {arg.get("name"): arg.get("value") for arg in call.get("call_args", [])}
 
-
 def call_arg_values(call):
     call = raw_value(call) or {}
     return [arg.get("value") for arg in call.get("call_args", [])]
-
 
 def get_call_arg(call, names, index=None):
     args_by_name = call_arg_map(call)
@@ -213,7 +229,6 @@ def get_call_arg(call, names, index=None):
         return values[index]
     return None
 
-
 def get_last_call_arg(call, names):
     value = get_call_arg(call, names)
     if value is not None:
@@ -221,7 +236,6 @@ def get_last_call_arg(call, names):
 
     values = call_arg_values(call)
     return values[-1] if values else None
-
 
 def phase_extrinsic_index(phase):
     phase = raw_value(phase)
@@ -237,7 +251,6 @@ def phase_extrinsic_index(phase):
             return int(phase)
     return None
 
-
 def event_record_extrinsic_index(record):
     phase = object_attr(record, "phase")
     index = phase_extrinsic_index(phase)
@@ -252,7 +265,6 @@ def event_record_extrinsic_index(record):
         return int(index) if index is not None else None
 
     return None
-
 
 def event_name(event):
     raw_event = event
@@ -272,7 +284,6 @@ def event_name(event):
         return "System", "ExtrinsicSuccess"
     return None, None
 
-
 def event_attributes(event):
     event = raw_value(event) or {}
     if isinstance(event, dict):
@@ -281,7 +292,6 @@ def event_attributes(event):
             attrs = event.get("params")
         return attrs or []
     return object_attr(event, "attributes", []) or object_attr(event, "params", []) or []
-
 
 def attr_value(attrs, names, index=None):
     if isinstance(attrs, dict):
@@ -306,10 +316,8 @@ def attr_value(attrs, names, index=None):
 
     return None
 
-
 def values_equal(left, right):
     return str(left) == str(right)
-
 
 def events_by_extrinsic_index(substrate, block_hash):
     grouped = {}
@@ -321,7 +329,6 @@ def events_by_extrinsic_index(substrate, block_hash):
         grouped.setdefault(index, []).append(record)
     return grouped
 
-
 def successful_extrinsic_indices(grouped_events):
     success_indices = set()
     for index, records in grouped_events.items():
@@ -331,7 +338,6 @@ def successful_extrinsic_indices(grouped_events):
                 success_indices.add(index)
                 break
     return success_indices
-
 
 def tao_received_by_account(events, account):
     total_rao = 0
@@ -352,7 +358,6 @@ def tao_received_by_account(events, account):
 
     return to_float_tao(total_rao) if total_rao else None
 
-
 def fee_paid_by_account(events, account):
     total_rao = 0
     for record in events:
@@ -371,7 +376,6 @@ def fee_paid_by_account(events, account):
             total_rao += int(amount)
 
     return to_float_tao(total_rao) if total_rao else None
-
 
 def subtensor_event_attrs(events, event_id, account=None, hotkey=None, origin_netuid=None, destination_netuid=None):
     for record in events:
@@ -392,7 +396,6 @@ def subtensor_event_attrs(events, event_id, account=None, hotkey=None, origin_ne
         return attrs
     return None
 
-
 def stake_swapped_tao(events, account, hotkey, origin_netuid, destination_netuid):
     attrs = subtensor_event_attrs(
         events,
@@ -405,7 +408,6 @@ def stake_swapped_tao(events, account, hotkey, origin_netuid, destination_netuid
     if attrs is None:
         return None
     return to_float_tao(attr_value(attrs, ("tao_amount", "amount"), 4))
-
 
 def stake_removed_amounts(events, account, hotkey, netuid):
     attrs = None
@@ -432,7 +434,6 @@ def stake_removed_amounts(events, account, hotkey, netuid):
     alpha = to_float_tao(attr_value(attrs, ("alpha_amount",), 3))
     return tao, alpha
 
-
 def stake_removed_entries(events, account, hotkey):
     entries = []
     for record in events:
@@ -454,7 +455,6 @@ def stake_removed_entries(events, account, hotkey):
         })
     return entries
 
-
 def stake_added_amounts(events, account, hotkey, netuid):
     for record in events:
         event = object_attr(record, "event")
@@ -475,7 +475,6 @@ def stake_added_amounts(events, account, hotkey, netuid):
         return tao, alpha
     return None, None
 
-
 def stake_transferred_entry(events):
     for record in events:
         event = object_attr(record, "event")
@@ -494,7 +493,6 @@ def stake_transferred_entry(events):
         }
     return None
 
-
 def first_stake_removed_entry(events):
     for record in events:
         event = object_attr(record, "event")
@@ -503,14 +501,13 @@ def first_stake_removed_entry(events):
             continue
         attrs = event_attributes(event)
         return {
-            "account": normalize_address(attr_value(attrs, ("coldkey", "account"), 0)),
+            "account": normalize_address(attr_value(attrs, ("coldkey", "account"), 0)) if attr_value(attrs, ("coldkey", "account"), 0) else None,
             "hotkey": normalize_address(attr_value(attrs, ("hotkey",), 1)),
             "tao_amount": to_float_tao(attr_value(attrs, ("tao_amount", "amount"), 2)),
             "alpha_amount": to_float_tao(attr_value(attrs, ("alpha_amount",), 3)),
             "netuid": attr_value(attrs, ("netuid",), 4),
         }
     return None
-
 
 def first_stake_added_entry(events):
     for record in events:
@@ -520,14 +517,13 @@ def first_stake_added_entry(events):
             continue
         attrs = event_attributes(event)
         return {
-            "account": normalize_address(attr_value(attrs, ("coldkey", "account"), 0)),
+            "account": normalize_address(attr_value(attrs, ("coldkey", "account"), 0)) if attr_value(attrs, ("coldkey", "account"), 0) else None,
             "hotkey": normalize_address(attr_value(attrs, ("hotkey",), 1)),
             "tao_amount": to_float_tao(attr_value(attrs, ("tao_amount", "amount"), 2)),
             "alpha_amount": to_float_tao(attr_value(attrs, ("alpha_amount",), 3)),
             "netuid": attr_value(attrs, ("netuid",), 4),
         }
     return None
-
 
 def alert_from_evm_stake_transfer(events, tx_ref=None, tx_hash=None):
     entry = stake_transferred_entry(events)
@@ -562,7 +558,7 @@ def alert_from_evm_stake_transfer(events, tx_ref=None, tx_hash=None):
             check_and_alert(
                 TEXT["add_stake"],
                 entry["to_account"],
-                tao_amount or 0,
+                added_tao or 0,
                 unit="TAO",
                 netuid=destination_netuid,
                 detail=hotkey,
@@ -608,7 +604,6 @@ def alert_from_evm_stake_transfer(events, tx_ref=None, tx_hash=None):
 
     return False
 
-
 def proxy_call_succeeded(events):
     saw_proxy = False
     for record in events:
@@ -625,7 +620,6 @@ def proxy_call_succeeded(events):
 
     return True if saw_proxy else None
 
-
 def has_subtensor_alertable_event(events):
     for record in events:
         event = object_attr(record, "event")
@@ -636,18 +630,22 @@ def has_subtensor_alertable_event(events):
             return True
     return False
 
-
 def send_telegram_msg_to_group(group_id, msg, audit_id=None, reply_markup=None, bot_token=None, chat_id=None):
-    TG_QUEUE.put({
-        "group_id": group_id,
-        "msg": msg,
-        "audit_id": audit_id,
-        "reply_markup": reply_markup,
-        "bot_token": bot_token,
-        "chat_id": chat_id,
-    })
-    return True
-
+    try:
+        TG_QUEUE.put({
+            "group_id": group_id,
+            "msg": msg,
+            "audit_id": audit_id,
+            "reply_markup": reply_markup,
+            "bot_token": bot_token,
+            "chat_id": chat_id,
+        }, block=False)
+        return True
+    except queue.Full:
+        db.add_log("ERROR", f"TG 消息队列堆积已满，丢弃该消息。分组 ID: {group_id}")
+        if audit_id:
+            db.update_notification_audit_log(audit_id, "failed", "消息队列溢出丢弃")
+        return False
 
 def _safe_tg_throttle_ms():
     raw_value = db.get_setting("tg_throttle_ms", "500")
@@ -657,13 +655,11 @@ def _safe_tg_throttle_ms():
         db.add_log("WARN", f"TG 推送间隔配置无效({raw_value})，已临时使用 500ms")
         return 500
 
-
 def _safe_retry_after(value):
     try:
         return max(1, int(float(value)))
     except (TypeError, ValueError):
         return 5
-
 
 def _load_tg_target(group_id, bot_token=None, chat_id=None):
     conn = db.get_db()
@@ -683,7 +679,6 @@ def _load_tg_target(group_id, bot_token=None, chat_id=None):
 
     return group, bot_token, chat_id, ""
 
-
 def _update_migrated_chat_id(group_id, group, old_chat_id, migrated_chat_id):
     conn = db.get_db()
     if str(old_chat_id) == str(group["tg_chat_id"]):
@@ -692,7 +687,6 @@ def _update_migrated_chat_id(group_id, group, old_chat_id, migrated_chat_id):
         conn.execute("UPDATE monitor_groups SET tg_chat_id_backup = ? WHERE id = ?", (str(migrated_chat_id), group_id))
     conn.commit()
     conn.close()
-
 
 def send_telegram_msg_to_group_now(group_id, msg, audit_id=None, reply_markup=None, bot_token=None, chat_id=None, allow_retry=True):
     global LAST_SEND_TIME, LAST_TG_SUCCESS_TIME, LAST_TG_ERROR
@@ -735,7 +729,7 @@ def send_telegram_msg_to_group_now(group_id, msg, audit_id=None, reply_markup=No
         LAST_TG_ERROR = error
         if audit_id:
             db.update_notification_audit_log(audit_id, "retrying" if allow_retry else "failed", error)
-        db.add_log("WARN", f"TG 频率限制，等待 {retry_after} 秒")
+        db.add_log("WARN", f"TG 频率限制，需要等待 {retry_after} 秒")
         return False, error
 
     if not res.ok:
@@ -773,33 +767,56 @@ def send_telegram_msg_to_group_now(group_id, msg, audit_id=None, reply_markup=No
         db.update_notification_audit_log(audit_id, "sent", "")
     return True, ""
 
-
 def _process_tg_queue_item(item):
     global LAST_SEND_TIME
+    max_retries = 3
+    attempt = 0
 
-    throttle_ms = _safe_tg_throttle_ms()
-    elapsed = (time.time() - LAST_SEND_TIME) * 1000
-    if elapsed < throttle_ms:
-        time.sleep((throttle_ms - elapsed) / 1000)
+    # 原地通过循环方式发送同一条消息，防止 429 报错重回队尾时发生时序错乱
+    while attempt < max_retries:
+        attempt += 1
+        throttle_ms = _safe_tg_throttle_ms()
+        elapsed = (time.time() - LAST_SEND_TIME) * 1000
+        if elapsed < throttle_ms:
+            time.sleep((throttle_ms - elapsed) / 1000)
 
-    ok, error = send_telegram_msg_to_group_now(
-        item["group_id"],
-        item["msg"],
-        audit_id=item.get("audit_id"),
-        reply_markup=item.get("reply_markup"),
-        bot_token=item.get("bot_token"),
-        chat_id=item.get("chat_id"),
-    )
-    if not ok and error.startswith("429 retry_after="):
-        retry_after = _safe_retry_after(error.split("=", 1)[1] or 5)
-        time.sleep(retry_after)
-        TG_QUEUE.put(item)
+        ok, error = send_telegram_msg_to_group_now(
+            item["group_id"],
+            item["msg"],
+            audit_id=item.get("audit_id"),
+            reply_markup=item.get("reply_markup"),
+            bot_token=item.get("bot_token"),
+            chat_id=item.get("chat_id"),
+        )
+        
+        if ok:
+            return True
+            
+        if error.startswith("429 retry_after="):
+            retry_after = _safe_retry_after(error.split("=", 1)[1] or 5)
+            # 指数级退避重试，限制最大等待时间
+            sleep_sec = min(30, retry_after * attempt)
+            db.add_log("WARN", f"TG 推送频率限流，原地等待 {sleep_sec} 秒后进行第 {attempt} 次重试...")
+            time.sleep(sleep_sec)
+            continue
+        else:
+            # 其他网络或机器人配置报错，退出重试
+            break
 
+    # 超出重试次数
+    audit_id = item.get("audit_id")
+    if audit_id:
+        db.update_notification_audit_log(audit_id, "failed", f"发送重试超出上限: {LAST_TG_ERROR or '网络故障'}")
+    return False
 
 def tg_worker():
     global LAST_TG_ERROR
-    while True:
-        item = TG_QUEUE.get()
+    while IS_RUNNING:
+        try:
+            item = TG_QUEUE.get(timeout=1.0)
+        except queue.Empty:
+            continue
+
         try:
             _process_tg_queue_item(item)
         except Exception as e:
@@ -811,7 +828,6 @@ def tg_worker():
             db.add_log("ERROR", f"TG Worker 异常: {error}")
         finally:
             TG_QUEUE.task_done()
-
 
 def build_alert_message(
     title,
@@ -853,7 +869,7 @@ def build_alert_message(
     if action == TEXT["move_stake"]:
         icon = "🟡"
 
-    # 钱包监控组的自定义格式（无空行，带备注）
+    # 钱包监控组
     if group_type == "wallet":
         msg = f"{icon} <b>{safe_text(action)} SN{safe_text(format_netuid(netuid))}</b>\n"
         if received_tao is not None:
@@ -873,7 +889,7 @@ def build_alert_message(
             msg += f"🔎 区块: <code>{safe_text(tx_ref)}</code>\n"
         return msg
 
-    # 巨鲸组保持不变
+    # 巨鲸组
     msg = f"{icon} <b>{safe_text(action)} SN{safe_text(format_netuid(netuid))}</b>\n"
     if received_tao is not None:
         msg += f"{icon} Swap {received_tao:.4f} TAO\n\n"
@@ -886,7 +902,6 @@ def build_alert_message(
     msg += f"\n📍 子网{safe_text(format_netuid(netuid))} "
 
     if tx_ref:
-        detail_url = f"https://taostats.io/extrinsic/{tx_ref}"
         msg += f"🔎 区块: <code>{safe_text(tx_ref)}</code>\n"
 
     return msg
@@ -1005,7 +1020,6 @@ def check_and_alert(
             chat_id=chat_id,
         )
 
-
 def alert_from_stake_events(events, tx_ref=None, tx_hash=None):
     for record in events:
         event = object_attr(record, "event")
@@ -1055,7 +1069,6 @@ def alert_from_stake_events(events, tx_ref=None, tx_hash=None):
                 tx_hash=tx_hash,
             )
 
-
 def handle_call(call, signer, events=None, tx_ref=None, tx_hash=None):
     events = events or []
     call = raw_value(call) or {}
@@ -1077,7 +1090,6 @@ def handle_call(call, signer, events=None, tx_ref=None, tx_hash=None):
         return
 
     if call_module == "Balances" and call_function in TRANSFER_CALLS:
-        # a532519 版本：普通钱包转账提醒刻意关闭，只保留 stake 相关提醒。
         return
 
     if call_module == "SubtensorModule" and call_function in {"add_stake", "add_stake_limit"}:
@@ -1224,7 +1236,6 @@ def handle_call(call, signer, events=None, tx_ref=None, tx_hash=None):
                 tx_hash=tx_hash,
             )
 
-
 def process_block(substrate, block_hash, block, block_number=None):
     try:
         grouped_events = events_by_extrinsic_index(substrate, block_hash)
@@ -1249,7 +1260,6 @@ def process_block(substrate, block_hash, block, block_number=None):
                         continue
                     alert_from_stake_events(events, tx_ref=tx_ref, tx_hash=tx_hash)
                     continue
-                db.add_log("INFO", f"跳过无价格影响的 EVM 交易: {tx_ref or extrinsic_index}")
                 continue
 
             if not signer:
@@ -1258,45 +1268,121 @@ def process_block(substrate, block_hash, block, block_number=None):
 
             handle_call(call, signer, events=events, tx_ref=tx_ref, tx_hash=tx_hash)
     except Exception as e:
-        db.add_log("ERROR", f"区块解析失败: {str(e)}")
-
+        db.add_log("ERROR", f"区块 #{block_number or 'unknown'} 解析失败: {str(e)}")
 
 def uptime_heartbeat():
-    while True:
+    cleanup_counter = 0
+    while IS_RUNNING:
         db.record_uptime(1 if LAST_CONNECT_TIME > 0 else 0)
+        
+        # 每隔 60 分钟清理一次系统日志，解决每次 add_log 触发全表删除造成锁冲突的问题
+        cleanup_counter += 1
+        if cleanup_counter >= 60:
+            cleanup_counter = 0
+            try:
+                conn = db.get_db()
+                conn.execute("DELETE FROM system_logs WHERE created_at < datetime('now', '-1 day')")
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                db.add_log("WARN", f"定时自动清理过期日志失败: {str(e)}")
+                
         time.sleep(60)
 
-
 def start_scanner():
-    global LAST_CONNECT_TIME, LAST_BLOCK_TIME, LAST_BLOCK_NUMBER, LAST_ERROR, CURRENT_WSS_LABEL, LAST_WSS_LATENCY_MS
+    global LAST_CONNECT_TIME, LAST_BLOCK_TIME, LAST_BLOCK_NUMBER, LAST_ERROR, CURRENT_WSS_LABEL, LAST_WSS_LATENCY_MS, IS_RUNNING, CONSECUTIVE_HANDLER_ERRORS, ACTIVE_SUBSTRATE, WSS_INDEX
+    if IS_RUNNING:
+        db.add_log("WARN", "监控服务已经在运行中，请勿重复启动。")
+        return
+        
+    # 获得文件锁保障分布式多 worker 下只有一个进程能拉起扫描线程
+    if not acquire_lock():
+        db.add_log("WARN", "未获得 scanner.lock 排他锁，当前另有一个扫描器实例在运行。跳过本次线程拉起。")
+        return
+
+    IS_RUNNING = True
     db.add_log("INFO", "启动监控服务 Pro...")
+    
+    # 启动后台处理进程
     threading.Thread(target=tg_worker, daemon=True).start()
     threading.Thread(target=uptime_heartbeat, daemon=True).start()
 
-    while True:
+    while IS_RUNNING:
         try:
-            wss_label, wss_url = pick_wss_target()
+            # 负载均衡开关在此优雅重构，解析出 load_balance 指示
+            wss_label, wss_url, load_balance = pick_wss_target()
+            normalized_url = normalize_wss_url(wss_url)
             CURRENT_WSS_LABEL = wss_label
-            substrate = SubstrateInterface(url=wss_url)
+            
+            # 使用局部变量保存当前连接以隔离作用域，避免并发旧 handler 被污染
+            substrate = SubstrateInterface(url=normalized_url)
+            ACTIVE_SUBSTRATE = substrate
             LAST_CONNECT_TIME = time.time()
             LAST_ERROR = ""
-            db.add_log("INFO", f"WSS 连接成功: {wss_label}")
+            CONSECUTIVE_HANDLER_ERRORS = 0
+            db.add_log("INFO", f"WSS 连接成功: {wss_label} ({normalized_url})")
+
+            # 主备 failover 策略和负载均衡调度在 except 异常处理中统一管理
 
             def handler(obj, update_nr, subscription_id):
-                global LAST_BLOCK_TIME, LAST_BLOCK_NUMBER, LAST_WSS_LATENCY_MS
-                block_num = obj["header"]["number"]
-                request_start = time.perf_counter()
-                block_hash = substrate.get_block_hash(block_num)
-                block = substrate.get_block(block_hash=block_hash)
-                grouped_probe_start = time.perf_counter()
-                process_block(substrate, block_hash, block, block_number=block_num)
-                LAST_WSS_LATENCY_MS = int((grouped_probe_start - request_start) * 1000)
-                LAST_BLOCK_NUMBER = block_num
-                LAST_BLOCK_TIME = time.time()
+                global LAST_BLOCK_TIME, LAST_BLOCK_NUMBER, LAST_WSS_LATENCY_MS, CONSECUTIVE_HANDLER_ERRORS
+                try:
+                    block_num = obj["header"]["number"]
+                    request_start = time.perf_counter()
+                    # 使用闭包内引用的 local substrate，防止被并发重连的 ACTIVE_SUBSTRATE 污染
+                    block_hash = substrate.get_block_hash(block_num)
+                    block = substrate.get_block(block_hash=block_hash)
+                    grouped_probe_start = time.perf_counter()
+                    process_block(substrate, block_hash, block, block_number=block_num)
+                    LAST_WSS_LATENCY_MS = int((grouped_probe_start - request_start) * 1000)
+                    LAST_BLOCK_NUMBER = block_num
+                    LAST_BLOCK_TIME = time.time()
+                    CONSECUTIVE_HANDLER_ERRORS = 0
+                except Exception as ex:
+                    # 鲁棒处理：解析出错时记录日志，不终止 WebSocket 订阅线程
+                    CONSECUTIVE_HANDLER_ERRORS += 1
+                    err_msg = f"区块 #{obj.get('header', {}).get('number', 'unknown')} 处理异常 (累计 {CONSECUTIVE_HANDLER_ERRORS} 次): {str(ex)}"
+                    db.add_log("ERROR", err_msg)
+                    
+                    # 超过 5 次连续出错自动关闭抛出，由外层 reconnect 重连
+                    if CONSECUTIVE_HANDLER_ERRORS >= 5:
+                        raise RuntimeError("连续发生 5 次区块解析失败，主动重连") from ex
 
             substrate.subscribe_block_headers(handler)
         except Exception as e:
+            # 捕获连接异常并保存状态
+            was_connected = (LAST_CONNECT_TIME > 0)
             LAST_CONNECT_TIME = 0
             LAST_ERROR = str(e)
             db.add_log("ERROR", f"{CURRENT_WSS_LABEL or 'WSS'} 连接断开: {LAST_ERROR}")
+            
+            # 主备 failover 与负载均衡调度策略
+            if was_connected:
+                # 之前连接是成功的，代表本次是正常运行中断线
+                # 负载均衡模式下轮换下一个节点；主备模式下，重连时优先尝试主节点（重置为 0）
+                if load_balance:
+                    WSS_INDEX += 1
+                else:
+                    WSS_INDEX = 0
+            else:
+                # 之前尝试连接就失败了，当前节点不可用，轮换下一个节点尝试
+                WSS_INDEX += 1
+            
+            if not IS_RUNNING:
+                break
+                
             time.sleep(10)
+
+def stop_scanner():
+    global IS_RUNNING, LAST_CONNECT_TIME, ACTIVE_SUBSTRATE
+    IS_RUNNING = False
+    LAST_CONNECT_TIME = 0
+    if ACTIVE_SUBSTRATE:
+        try:
+            # 显式关闭连接，强迫 subscribe_block_headers() 底层 Websocket 抛出异常并立刻跳出阻塞，实现优雅退市
+            ACTIVE_SUBSTRATE.close()
+        except Exception:
+            pass
+        ACTIVE_SUBSTRATE = None
+    release_lock()
+    db.add_log("INFO", "监控服务已停止。")

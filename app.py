@@ -1,24 +1,66 @@
-﻿import os
+import os
 import threading
 import time
+import secrets
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Form, Depends, HTTPException, status, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
 import database as db
-import scanner # 修改：直接导入模块
+import scanner
 
-app = FastAPI(title="TAO 生态监控系统 PRO")
-app.add_middleware(SessionMiddleware, secret_key=os.environ.get("SESSION_SECRET", "tao_pro_ultra_secret"))
-templates = Jinja2Templates(directory="templates")
+# --- 安全：强制检查并移除固定的 SESSION_SECRET 默认值 ---
+session_secret = os.environ.get("SESSION_SECRET")
+if not session_secret or session_secret == "tao_pro_ultra_secret":
+    raise RuntimeError(
+        "CRITICAL SECURITY ERROR: SESSION_SECRET 环境变量未配置或使用了默认值！\n"
+        "请在 .env 文件或系统的 systemd 服务环境变量中配置高强度的密钥。"
+    )
 
-db.init_db()
+# --- 稳定性：通过 FastAPI Lifespan 管理后台扫描线程的生命周期与单例保护 ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动前初始化
+    db.init_db()
+    
+    # 启动扫描线程
+    threading.Thread(target=scanner.start_scanner, daemon=True).start()
+    
+    yield
+    
+    # 停止扫描器，释放 WSS 资源
+    scanner.stop_scanner()
 
-# 启动后台扫描线程
-threading.Thread(target=scanner.start_scanner, daemon=True).start()
+app = FastAPI(title="TAO 生态监控系统 PRO", lifespan=lifespan)
+app.add_middleware(SessionMiddleware, secret_key=session_secret)
+
+# 自动适配模板目录：如果脚本同级目录下存在 templates 目录，则直接使用它；否则回退到父级目录下的 templates
+local_templates = os.path.join(os.path.dirname(__file__), "templates")
+if os.path.isdir(local_templates):
+    templates = Jinja2Templates(directory=local_templates)
+else:
+    templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "..", "templates"))
+
+# --- CSRF 安全防御机制 ---
+def get_csrf_token(request: Request):
+    if "csrf_token" not in request.session:
+        request.session["csrf_token"] = secrets.token_urlsafe(32)
+    return request.session["csrf_token"]
+
+# 将 CSRF 令牌生成函数注入到 Jinja2 模板全局变量中
+templates.env.globals["get_csrf_token"] = get_csrf_token
+
+def verify_csrf(request: Request, csrf_token: str):
+    session_token = request.session.get("csrf_token")
+    if not session_token or csrf_token != session_token:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="CSRF Token 验证失败，请刷新页面后重试。"
+        )
 
 BJ_OFFSET_SECONDS = 8 * 60 * 60
 BEIJING_TZ = timezone(timedelta(hours=8))
@@ -41,7 +83,6 @@ def with_beijing_created_at(rows):
     return converted
 
 def get_uptime_seconds():
-    # 从 scanner 模块获取最后一次成功连接的时间
     if scanner.LAST_CONNECT_TIME == 0:
         return 0
     return int(time.time() - scanner.LAST_CONNECT_TIME)
@@ -126,29 +167,46 @@ def check_login(request: Request):
         raise HTTPException(status_code=status.HTTP_302_FOUND, headers={"Location": "/login"})
     return True
 
+# --- 路由定义 (同步运行，避免事件循环卡死) ---
+
 @app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request):
+def login_page(request: Request):
     return templates.TemplateResponse("login.html", {"request": request})
 
 @app.post("/login")
-async def do_login(request: Request, username: str = Form(...), password: str = Form(...)):
+def do_login(request: Request, username: str = Form(...), password: str = Form(...)):
+    # 防爆破登录锁定逻辑
+    ip = request.client.host
+    locked, remaining = db.is_login_locked(ip)
+    if locked:
+        return templates.TemplateResponse("login.html", {
+            "request": request,
+            "error": f"登录失败次数过多，此 IP 被限制登录。请在 {int(remaining/60) + 1} 分钟后再试。"
+        })
+
     if db.verify_user(username, password):
+        db.record_login_attempt(ip, success=True)
         request.session["user"] = username
         return RedirectResponse(url="/", status_code=status.HTTP_302_FOUND)
+        
+    db.record_login_attempt(ip, success=False)
     return templates.TemplateResponse("login.html", {"request": request, "error": "账号或密码错误"})
 
-@app.get("/logout")
-async def logout(request: Request):
+# --- 安全修复：退出登录修改为 POST ---
+@app.post("/logout")
+def logout(request: Request, csrf_token: str = Form(...)):
+    check_login(request)
+    verify_csrf(request, csrf_token)
     request.session.clear()
-    return RedirectResponse(url="/login")
+    return RedirectResponse(url="/login", status_code=303)
 
 @app.get("/api/status")
-async def api_status(request: Request):
+def api_status(request: Request):
     check_login(request)
     return JSONResponse(get_runtime_status())
 
 @app.get("/api/test_wss/{slot}")
-async def api_test_wss(request: Request, slot: str):
+def api_test_wss(request: Request, slot: str):
     check_login(request)
     if slot not in {"primary", "backup"}:
         raise HTTPException(status_code=400, detail="invalid slot")
@@ -166,9 +224,11 @@ async def api_test_wss(request: Request, slot: str):
         return JSONResponse({"ok": False, "slot": slot, "url": raw_url, "error": str(e)}, status_code=200)
 
 @app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
-    try: check_login(request)
-    except: return RedirectResponse("/login")
+def home(request: Request):
+    try:
+        check_login(request)
+    except:
+        return RedirectResponse("/login")
 
     uptime_data = db.get_uptime_data()
     uptime_points = db.get_uptime_series()
@@ -184,7 +244,7 @@ async def home(request: Request):
     })
 
 @app.get("/logs", response_class=HTMLResponse)
-async def logs_page(request: Request):
+def logs_page(request: Request):
     check_login(request)
     conn = db.get_db()
     logs = conn.execute("SELECT * FROM system_logs ORDER BY created_at DESC LIMIT 100").fetchall()
@@ -201,7 +261,7 @@ async def logs_page(request: Request):
     })
 
 @app.get("/audit", response_class=HTMLResponse)
-async def audit_page(request: Request):
+def audit_page(request: Request):
     check_login(request)
     audit_logs = with_beijing_created_at(db.get_notification_audit_logs(100))
     uptime_sec = get_uptime_seconds()
@@ -215,7 +275,7 @@ async def audit_page(request: Request):
     })
 
 @app.get("/monitoring", response_class=HTMLResponse)
-async def monitoring_page(request: Request):
+def monitoring_page(request: Request):
     check_login(request)
     open_group = request.query_params.get("open_group", "")
     groups = db.get_groups()
@@ -234,7 +294,7 @@ async def monitoring_page(request: Request):
     })
 
 @app.get("/settings", response_class=HTMLResponse)
-async def settings_page(request: Request):
+def settings_page(request: Request):
     check_login(request)
     settings = {
         "dwellir_wss": db.get_setting("dwellir_wss", "wss://api-bittensor-mainnet.n.dwellir.com"),
@@ -247,13 +307,14 @@ async def settings_page(request: Request):
     return templates.TemplateResponse("index.html", {"request": request, "page": "settings", "settings": settings, "uptime": uptime_str, "status": get_runtime_status()})
 
 @app.post("/group/add")
-async def add_group(request: Request, name: str = Form(...), type: str = Form(...)):
+def add_group(request: Request, name: str = Form(...), type: str = Form(...), csrf_token: str = Form(...)):
     check_login(request)
+    verify_csrf(request, csrf_token)
     db.execute_write("INSERT INTO monitor_groups (name, type) VALUES (?, ?)", (name, type))
     return RedirectResponse("/monitoring", status_code=303)
 
 @app.post("/group/update/{id}")
-async def update_group(
+def update_group(
     request: Request,
     id: int,
     tg_token: str = Form(""),
@@ -262,8 +323,10 @@ async def update_group(
     tg_chat_id_backup: str = Form(""),
     split_stake_bots: str = Form("0"),
     threshold_tao: float = Form(5.0),
+    csrf_token: str = Form(...),
 ):
     check_login(request)
+    verify_csrf(request, csrf_token)
     db.execute_write(
         """
         UPDATE monitor_groups
@@ -283,57 +346,71 @@ async def update_group(
     return RedirectResponse(f"/monitoring?open_group={id}", status_code=303)
 
 @app.post("/group/rename/{id}")
-async def rename_group(request: Request, id: int, name: str = Form(...)):
+def rename_group(request: Request, id: int, name: str = Form(...), csrf_token: str = Form(...)):
     check_login(request)
+    verify_csrf(request, csrf_token)
     db.execute_write("UPDATE monitor_groups SET name=? WHERE id=?", (name.strip(), id))
     return RedirectResponse(f"/monitoring?open_group={id}", status_code=303)
 
 @app.post("/group/delete/{id}")
-async def delete_group(request: Request, id: int):
+def delete_group(request: Request, id: int, csrf_token: str = Form(...)):
     check_login(request)
+    verify_csrf(request, csrf_token)
     db.execute_write("DELETE FROM monitor_groups WHERE id=?", (id,))
     return RedirectResponse("/monitoring", status_code=303)
 
 @app.post("/wallet/add")
-async def add_wallet(request: Request, group_id: int = Form(...), address: str = Form(...), alias: str = Form(...)):
+def add_wallet(request: Request, group_id: int = Form(...), address: str = Form(...), alias: str = Form(...), csrf_token: str = Form(...)):
     check_login(request)
+    verify_csrf(request, csrf_token)
     db.execute_write("INSERT INTO wallets (group_id, address, alias) VALUES (?, ?, ?)", (group_id, address.strip(), alias.strip()))
     return RedirectResponse(f"/monitoring?open_group={group_id}", status_code=303)
 
-@app.get("/wallet/toggle/{id}/{state}")
-async def toggle_wallet(request: Request, id: int, state: int):
+@app.post("/wallet/toggle/{id}")
+def toggle_wallet(request: Request, id: int, state: int = Form(...), csrf_token: str = Form(...)):
     check_login(request)
+    verify_csrf(request, csrf_token)
     def operation(conn):
         wallet = conn.execute("SELECT group_id FROM wallets WHERE id=?", (id,)).fetchone()
         conn.execute("UPDATE wallets SET is_active=? WHERE id=?", (state, id))
         return wallet["group_id"] if wallet else ""
 
     group_id = db.execute_write_returning(operation)
-    return RedirectResponse(f"/monitoring?open_group={group_id}")
+    return RedirectResponse(f"/monitoring?open_group={group_id}", status_code=303)
 
-@app.get("/wallet/delete/{id}")
-async def del_wallet(request: Request, id: int):
+@app.post("/wallet/delete/{id}")
+def del_wallet(request: Request, id: int, csrf_token: str = Form(...)):
     check_login(request)
+    verify_csrf(request, csrf_token)
     def operation(conn):
         wallet = conn.execute("SELECT group_id FROM wallets WHERE id=?", (id,)).fetchone()
         conn.execute("DELETE FROM wallets WHERE id=?", (id,))
         return wallet["group_id"] if wallet else ""
 
     group_id = db.execute_write_returning(operation)
-    return RedirectResponse(f"/monitoring?open_group={group_id}")
+    return RedirectResponse(f"/monitoring?open_group={group_id}", status_code=303)
 
 @app.post("/save_settings")
-async def save_sys_settings(request: Request, dwellir_wss: str = Form(...), dwellir_wss_backup: str = Form(""), wss_load_balance: str = Form("0"), tg_throttle_ms: str = Form(...)):
+def save_sys_settings(
+    request: Request, 
+    dwellir_wss: str = Form(...), 
+    dwellir_wss_backup: str = Form(""), 
+    wss_load_balance: str = Form("0"), 
+    tg_throttle_ms: str = Form(...),
+    csrf_token: str = Form(...)
+):
     check_login(request)
+    verify_csrf(request, csrf_token)
     db.set_setting("dwellir_wss", dwellir_wss.strip())
     db.set_setting("dwellir_wss_backup", dwellir_wss_backup.strip())
     db.set_setting("wss_load_balance", "1" if wss_load_balance == "1" else "0")
     db.set_setting("tg_throttle_ms", tg_throttle_ms)
     return RedirectResponse("/settings", status_code=303)
 
-@app.get("/test_tg/{group_id}")
-async def test_tg(request: Request, group_id: int):
+@app.post("/test_tg/{group_id}")
+def test_tg(request: Request, group_id: int, csrf_token: str = Form(...)):
     check_login(request)
+    verify_csrf(request, csrf_token)
     success, error = scanner.send_telegram_msg_to_group_now(group_id, "🔔 <b>测试通知</b>\n该分组机器人配置正确！", allow_retry=False)
     if success:
         return RedirectResponse(f"/monitoring?open_group={group_id}&msg=Success", status_code=303)
@@ -342,9 +419,9 @@ async def test_tg(request: Request, group_id: int):
     return RedirectResponse(f"/monitoring?open_group={group_id}&msg={safe_error}", status_code=303)
 
 @app.get("/backup")
-async def backup():
+def backup(request: Request):
+    check_login(request)
     return FileResponse(db.DB_PATH, filename="tao_pro_backup.db")
-
 
 def build_wallet_txt(groups):
     lines = []
@@ -354,7 +431,6 @@ def build_wallet_txt(groups):
             lines.append(f"{wallet['address']}|{wallet['alias']}")
         lines.append("")
     return "\n".join(lines).strip() + "\n"
-
 
 def parse_wallet_txt(text):
     parsed = []
@@ -383,9 +459,8 @@ def parse_wallet_txt(text):
         current_group["wallets"].append({"address": address, "alias": alias})
     return parsed
 
-
 @app.get("/export_wallets")
-async def export_wallets(request: Request):
+def export_wallets(request: Request):
     check_login(request)
     groups = db.get_groups()
     for group in groups:
@@ -396,9 +471,8 @@ async def export_wallets(request: Request):
         f.write(content)
     return FileResponse(export_path, filename="wallet_groups_export.txt", media_type="text/plain")
 
-
 @app.get("/wallet_template")
-async def wallet_template(request: Request):
+def wallet_template(request: Request):
     check_login(request)
     template = "# 默认巨鲸组|whale\n5ABC...地址1|备注1\n5DEF...地址2|备注2\n\n# 默认钱包组|wallet\n5XYZ...地址3|备注3\n"
     template_path = os.path.join(os.path.dirname(__file__), "wallet_groups_template.txt")
@@ -406,11 +480,13 @@ async def wallet_template(request: Request):
         f.write(template)
     return FileResponse(template_path, filename="wallet_groups_template.txt", media_type="text/plain")
 
-
 @app.post("/import_wallets")
-async def import_wallets(request: Request, file: UploadFile = File(...)):
+def import_wallets(request: Request, file: UploadFile = File(...), csrf_token: str = Form(...)):
     check_login(request)
-    raw = await file.read()
+    verify_csrf(request, csrf_token)
+    
+    # 性能优化：直接使用同步读取，避免事件循环空转
+    raw = file.file.read()
     text = raw.decode("utf-8")
     parsed_groups = parse_wallet_txt(text)
 
@@ -446,7 +522,6 @@ async def import_wallets(request: Request, file: UploadFile = File(...)):
                     )
 
     db.execute_write_returning(operation)
-
     return RedirectResponse("/monitoring", status_code=303)
 
 if __name__ == "__main__":

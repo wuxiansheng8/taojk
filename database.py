@@ -1,16 +1,33 @@
-﻿import sqlite3
+import sqlite3
 import os
 import time
+import threading
 from passlib.context import CryptContext
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-DB_PATH = os.path.join(os.path.dirname(__file__), 'data.db')
+# 自动适配：若在 proposed 子目录下测试，数据库放置在父级目录；否则放置在同级目录下
+if os.path.basename(os.path.dirname(__file__)) == "proposed":
+    DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'data.db')
+else:
+    DB_PATH = os.path.join(os.path.dirname(__file__), 'data.db')
 DB_TIMEOUT_SECONDS = 30
 DB_BUSY_TIMEOUT_MS = 30000
 DB_RETRY_DELAYS = (0.2, 0.5, 1.0, 2.0)
 
+# --- 内存缓存系统与线程锁 ---
+_GROUPS_CACHE = None
+_WALLETS_CACHE = {}  # group_id -> wallets 列表
+_cache_lock = threading.RLock()  # 读写锁保护，保证多线程安全
+
+def clear_cache():
+    global _GROUPS_CACHE, _WALLETS_CACHE
+    with _cache_lock:
+        _GROUPS_CACHE = None
+        _WALLETS_CACHE = {}
+
 def get_db():
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT_SECONDS)
+    resolved_path = os.path.abspath(DB_PATH)
+    conn = sqlite3.connect(resolved_path, timeout=DB_TIMEOUT_SECONDS)
     conn.row_factory = sqlite3.Row
     conn.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -20,6 +37,7 @@ def _is_locked_error(error):
     return "database is locked" in str(error).lower() or "database table is locked" in str(error).lower()
 
 def _run_write(operation):
+    # 移除了在此处无条件清除缓存的代码，避免高频日志/审计写入将缓存优化彻底打掉。
     last_error = None
     for attempt, delay in enumerate((0, *DB_RETRY_DELAYS)):
         if delay:
@@ -43,9 +61,14 @@ def execute_write(sql, params=()):
         conn.execute(sql, params)
 
     _run_write(operation)
+    # 仅在实际的分组/钱包/配置被修改时才清除配置缓存
+    clear_cache()
 
 def execute_write_returning(operation):
-    return _run_write(operation)
+    res = _run_write(operation)
+    # 仅在实际的配置写入被调用时清除缓存
+    clear_cache()
+    return res
 
 def init_db():
     conn = get_db()
@@ -53,12 +76,12 @@ def init_db():
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
 
-    # 1. 监控分组表 (每个组可以有不同的机器人和阈值)
+    # 1. 监控分组表
     c.execute('''
         CREATE TABLE IF NOT EXISTS monitor_groups (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
-            type TEXT NOT NULL, -- 'whale' 或 'wallet'
+            type TEXT NOT NULL,
             tg_token TEXT,
             tg_chat_id TEXT,
             tg_token_backup TEXT,
@@ -69,7 +92,7 @@ def init_db():
         )
     ''')
 
-    # 2. 钱包表 (关联到分组)
+    # 2. 钱包表
     c.execute('''
         CREATE TABLE IF NOT EXISTS wallets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,17 +108,17 @@ def init_db():
     c.execute('''
         CREATE TABLE IF NOT EXISTS system_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            level TEXT, -- INFO, ERROR, WARN
+            level TEXT,
             message TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
 
-    # 4. 可用性看板数据 (记录每分钟状态)
+    # 4. 可用性看板数据
     c.execute('''
         CREATE TABLE IF NOT EXISTS uptime_history (
             timestamp INTEGER PRIMARY KEY,
-            status INTEGER -- 1 为正常, 0 为异常
+            status INTEGER
         )
     ''')
 
@@ -132,7 +155,23 @@ def init_db():
         )
     ''')
 
-    # 默认创建一个巨鲸监控组和钱包监控组 (如果不存在)
+    # 8. 登录尝试记录表 (防爆破)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS login_attempts (
+            ip TEXT PRIMARY KEY,
+            attempts INTEGER DEFAULT 0,
+            last_attempt INTEGER NOT NULL
+        )
+    ''')
+
+    # --- 性能优化：创建常用索引 ---
+    c.execute("CREATE INDEX IF NOT EXISTS idx_wallets_group_addr ON wallets(group_id, address)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_wallets_address ON wallets(address)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_system_logs_created ON system_logs(created_at)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON notification_audit_logs(created_at)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_status_created ON notification_audit_logs(send_status, created_at)")
+
+    # 默认创建一个巨鲸监控组和钱包监控组
     c.execute("SELECT count(*) FROM monitor_groups")
     if c.fetchone()[0] == 0:
         c.execute("INSERT INTO monitor_groups (name, type, threshold_tao) VALUES ('默认巨鲸组', 'whale', 5.0)")
@@ -154,8 +193,6 @@ def init_db():
 def add_log(level, message):
     def operation(conn):
         conn.execute("INSERT INTO system_logs (level, message) VALUES (?, ?)", (level, message))
-        # 自动清理24小时前的日志
-        conn.execute("DELETE FROM system_logs WHERE created_at < datetime('now', '-1 day')")
 
     _run_write(operation)
 
@@ -163,7 +200,6 @@ def record_uptime(status):
     def operation(conn):
         now_min = int(time.time() / 60) * 60
         conn.execute("INSERT OR REPLACE INTO uptime_history (timestamp, status) VALUES (?, ?)", (now_min, status))
-        # 只保留最近24小时的数据 (1440分钟)
         conn.execute("DELETE FROM uptime_history WHERE timestamp < ?", (now_min - 86400,))
 
     _run_write(operation)
@@ -171,7 +207,6 @@ def record_uptime(status):
 def get_uptime_data():
     conn = get_db()
     c = conn.cursor()
-    # 获取最近24小时的1440个数据点，如果没有则补0
     now_min = int(time.time() / 60) * 60
     start_min = now_min - 86400
     c.execute("SELECT timestamp, status FROM uptime_history WHERE timestamp >= ? ORDER BY timestamp ASC", (start_min,))
@@ -182,7 +217,6 @@ def get_uptime_data():
         data.append(rows.get(t, 0))
     conn.close()
     return data
-
 
 def get_uptime_series():
     conn = get_db()
@@ -198,7 +232,7 @@ def get_uptime_series():
     conn.close()
     return points
 
-# --- 基础配置管理 (原有逻辑适配) ---
+# --- 基础配置管理 ---
 
 def create_admin_user(username, plain_password):
     hashed_pwd = pwd_context.hash(plain_password)
@@ -207,12 +241,45 @@ def create_admin_user(username, plain_password):
         conn.execute("INSERT OR REPLACE INTO users (username, password_hash) VALUES (?, ?)", (username, hashed_pwd))
 
     _run_write(operation)
+    clear_cache()
 
 def verify_user(username, plain_password):
     conn = get_db()
     row = conn.execute("SELECT password_hash FROM users WHERE username = ?", (username,)).fetchone()
     conn.close()
     return pwd_context.verify(plain_password, row['password_hash']) if row else False
+
+# --- 登录防爆破逻辑 ---
+
+def record_login_attempt(ip, success):
+    def operation(conn):
+        now = int(time.time())
+        if success:
+            conn.execute("DELETE FROM login_attempts WHERE ip = ?", (ip,))
+        else:
+            row = conn.execute("SELECT attempts FROM login_attempts WHERE ip = ?", (ip,)).fetchone()
+            attempts = row["attempts"] + 1 if row else 1
+            conn.execute("INSERT OR REPLACE INTO login_attempts (ip, attempts, last_attempt) VALUES (?, ?, ?)", (ip, attempts, now))
+    _run_write(operation)
+
+def is_login_locked(ip):
+    conn = get_db()
+    row = conn.execute("SELECT attempts, last_attempt FROM login_attempts WHERE ip = ?", (ip,)).fetchone()
+    conn.close()
+    if not row:
+        return False, 0
+    attempts = row["attempts"]
+    last_attempt = row["last_attempt"]
+    lock_duration = 900
+    now = int(time.time())
+    if attempts >= 5 and (now - last_attempt) < lock_duration:
+        remaining = lock_duration - (now - last_attempt)
+        return True, remaining
+    if (now - last_attempt) >= lock_duration:
+        def operation(conn):
+            conn.execute("DELETE FROM login_attempts WHERE ip = ?", (ip,))
+        _run_write(operation)
+    return False, 0
 
 def get_setting(key, default=""):
     conn = get_db()
@@ -225,19 +292,31 @@ def set_setting(key, value):
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
 
     _run_write(operation)
+    clear_cache()
+
+# --- 读操作缓存与锁（返回深层拷贝以防调用方修改污染缓存） ---
 
 def get_groups():
-    conn = get_db()
-    rows = conn.execute("SELECT * FROM monitor_groups").fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    global _GROUPS_CACHE
+    with _cache_lock:
+        if _GROUPS_CACHE is not None:
+            return [dict(g) for g in _GROUPS_CACHE]
+        conn = get_db()
+        rows = conn.execute("SELECT * FROM monitor_groups").fetchall()
+        conn.close()
+        _GROUPS_CACHE = [dict(r) for r in rows]
+        return [dict(g) for g in _GROUPS_CACHE]
 
 def get_wallets_by_group(group_id):
-    conn = get_db()
-    rows = conn.execute("SELECT * FROM wallets WHERE group_id = ?", (group_id,)).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
+    global _WALLETS_CACHE
+    with _cache_lock:
+        if group_id in _WALLETS_CACHE:
+            return [dict(w) for w in _WALLETS_CACHE[group_id]]
+        conn = get_db()
+        rows = conn.execute("SELECT * FROM wallets WHERE group_id = ?", (group_id,)).fetchall()
+        conn.close()
+        _WALLETS_CACHE[group_id] = [dict(r) for r in rows]
+        return [dict(w) for w in _WALLETS_CACHE[group_id]]
 
 def get_wallet_by_group_and_address(group_id, address):
     conn = get_db()
@@ -302,13 +381,11 @@ def get_notification_audit_logs(limit=100):
     conn.close()
     return rows
 
-
 def get_notification_audit_count():
     conn = get_db()
     row = conn.execute("SELECT COUNT(*) AS total FROM notification_audit_logs").fetchone()
     conn.close()
     return row["total"] if row else 0
-
 
 def get_notification_success_rate(hours=24):
     conn = get_db()

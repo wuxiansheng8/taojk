@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -333,7 +333,9 @@
                     {% endif %}
                 </span>
             </div>
-            <a href="/logout" class="text-xs text-red-400 hover:underline mt-2 block"><i class="fas fa-sign-out-alt"></i> 退出登录</a>
+            <button type="button" onclick="submitPost('/logout')" class="text-xs text-red-400 hover:underline mt-2 block w-full text-left bg-transparent border-0 p-0 cursor-pointer focus:outline-none">
+                <i class="fas fa-sign-out-alt"></i> 退出登录
+            </button>
         </div>
     </aside>
 
@@ -357,7 +359,9 @@
                 <a href="/wallet_template" class="text-sm bg-emerald-600 hover:bg-emerald-700 px-3 py-1.5 rounded flex items-center gap-2">
                     <i class="fas fa-file-arrow-down"></i> 模板下载
                 </a>
+                <!-- 优化：在文件导入表单中注入 CSRF token，并将文件 enctype 笔误修正为 multipart/form-data -->
                 <form id="wallet-import-form" action="/import_wallets" method="POST" enctype="multipart/form-data" class="hidden">
+                    <input type="hidden" name="csrf_token" value="{{ get_csrf_token(request) }}">
                     <input id="wallet-import-input" type="file" name="file" accept=".txt,text/plain" onchange="document.getElementById('wallet-import-form').submit()">
                 </form>
             </div>
@@ -553,6 +557,7 @@
                             <div class="group-name-wrap" ondblclick="startGroupNameEdit(event, {{ g.id }})">
                                 <h4 class="group-name-display font-bold">{{ g.name }}</h4>
                                 <form action="/group/rename/{{ g.id }}" method="POST" class="group-name-input">
+                                    <input type="hidden" name="csrf_token" value="{{ get_csrf_token(request) }}">
                                     <input type="text" name="name" value="{{ g.name }}" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500" onkeydown="handleGroupNameKeydown(event)" onblur="submitGroupNameEdit(this)">
                                 </form>
                             </div>
@@ -567,6 +572,7 @@
                     <div class="grid grid-cols-1 gap-10">
                         <!-- 分组配置 -->
                         <form action="/group/update/{{ g.id }}" method="POST" class="space-y-4">
+                            <input type="hidden" name="csrf_token" value="{{ get_csrf_token(request) }}">
                             <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                                 <div class="space-y-4">
                                     <div>
@@ -603,12 +609,14 @@
                             </div>
                             {% endif %}
                             <div class="flex justify-end">
-                                <a href="/test_tg/{{ g.id }}" class="text-xs text-blue-400 hover:underline">测试TG机器人</a>
+                                <!-- 安全：测试 TG 按钮改为 POST 形式 -->
+                                <button type="button" onclick="submitPost('/test_tg/{{ g.id }}')" class="text-xs text-blue-400 hover:underline">测试TG机器人</button>
                             </div>
                             <button type="submit" class="w-full bg-gray-700 hover:bg-gray-600 text-sm py-2 rounded transition-colors">保存分组设置</button>
                         </form>
                         <div class="flex justify-end">
                             <form action="/group/delete/{{ g.id }}" method="POST" onsubmit="return confirm('确认删除分组「{{ g.name }}」吗？该分组下的钱包也会一起删除。')">
+                                <input type="hidden" name="csrf_token" value="{{ get_csrf_token(request) }}">
                                 <button type="submit" class="text-xs text-red-500 hover:text-red-400">
                                     <i class="fas fa-trash mr-1"></i> 删除分组
                                 </button>
@@ -633,12 +641,16 @@
                                         <span class="wallet-address text-gray-500 font-mono">{{ w.address[:10] }}...{{ w.address[-4:] }}</span>
                                     </div>
                                     <div class="flex items-center gap-3">
-                                        <a href="/wallet/toggle/{{ w.id }}/{{ 0 if w.is_active else 1 }}">
+                                        <!-- 安全优化：GET 切换链接改 POST 触发 -->
+                                        <button type="button" onclick="toggleWalletState({{ w.id }}, {{ 0 if w.is_active else 1 }})" class="focus:outline-none">
                                             <div class="w-8 h-4 {% if w.is_active %}bg-blue-600{% else %}bg-gray-600{% endif %} rounded-full relative">
                                                 <div class="w-3 h-3 bg-white rounded-full absolute top-0.5 transition-all {% if w.is_active %}right-0.5{% else %}left-0.5{% endif %}"></div>
                                             </div>
-                                        </a>
-                                        <a href="/wallet/delete/{{ w.id }}" onclick="return confirm('确认删除这个钱包吗？删除后不会再监控。')" class="text-red-500 hover:text-red-400" title="删除钱包"><i class="fas fa-trash"></i></a>
+                                        </button>
+                                        <!-- 安全优化：GET 删除改 POST 触发 -->
+                                        <button type="button" onclick="deleteWallet({{ w.id }})" class="text-red-500 hover:text-red-400" title="删除钱包">
+                                            <i class="fas fa-trash"></i>
+                                        </button>
                                     </div>
                                 </div>
                                 {% endfor %}
@@ -655,6 +667,7 @@
                 <div class="bg-gray-800 p-8 rounded-xl border border-gray-700 w-96">
                     <h4 class="text-xl font-bold mb-6">新增监控分组</h4>
                     <form action="/group/add" method="POST" class="space-y-4">
+                        <input type="hidden" name="csrf_token" value="{{ get_csrf_token(request) }}">
                         <div>
                             <label class="block text-sm text-gray-400 mb-1">分组名称</label>
                             <input type="text" name="name" placeholder="例如：大户监控、二级市场跟单" class="w-full bg-gray-900 border border-gray-700 rounded p-2 focus:outline-none" required>
@@ -679,6 +692,7 @@
                 <div class="bg-gray-800 p-8 rounded-xl border border-gray-700 w-96">
                     <h4 class="text-xl font-bold mb-6">添加监控钱包</h4>
                     <form action="/wallet/add" method="POST" class="space-y-4">
+                        <input type="hidden" name="csrf_token" value="{{ get_csrf_token(request) }}">
                         <input type="hidden" name="group_id" id="modal_group_id">
                         <div>
                             <label class="block text-sm text-gray-400 mb-1">钱包备注</label>
@@ -696,7 +710,38 @@
                 </div>
             </div>
 
+            <!-- 统一的 POST 请求表单辅助函数 -->
+            <form id="global-csrf-post-form" method="POST" class="hidden">
+                <input type="hidden" name="csrf_token" value="{{ get_csrf_token(request) }}">
+                <div id="global-csrf-post-params"></div>
+            </form>
+
             <script>
+                function submitPost(url, params = {}) {
+                    const form = document.getElementById('global-csrf-post-form');
+                    form.action = url;
+                    const paramsContainer = document.getElementById('global-csrf-post-params');
+                    paramsContainer.innerHTML = '';
+                    for (const [key, value] of Object.entries(params)) {
+                        const input = document.createElement('input');
+                        input.type = 'hidden';
+                        input.name = key;
+                        input.value = value;
+                        paramsContainer.appendChild(input);
+                    }
+                    form.submit();
+                }
+
+                function toggleWalletState(walletId, targetState) {
+                    submitPost(`/wallet/toggle/${walletId}`, { state: targetState });
+                }
+
+                function deleteWallet(walletId) {
+                    if (confirm('确认删除这个钱包吗？删除后不会再监控。')) {
+                        submitPost(`/wallet/delete/${walletId}`);
+                    }
+                }
+
                 function openAddWalletModal(groupId) {
                     document.getElementById('modal_group_id').value = groupId;
                     document.getElementById('addWalletModal').classList.remove('hidden');
@@ -810,6 +855,7 @@
                 <div class="bg-gray-800 p-8 rounded-xl border border-gray-700">
                     <h3 class="text-xl font-bold mb-6 border-b border-gray-700 pb-4">系统环境与网络设置</h3>
                     <form action="/save_settings" method="POST" class="space-y-6">
+                        <input type="hidden" name="csrf_token" value="{{ get_csrf_token(request) }}">
                         <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
                             <div class="space-y-6">
                                 <div class="text-sm font-bold text-blue-300 border-b border-gray-700 pb-3">Dwellir WSS</div>
