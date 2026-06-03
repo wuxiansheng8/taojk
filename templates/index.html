@@ -548,7 +548,7 @@
                 </div>
 
                 {% for g in groups %}
-                <div class="monitor-group bg-gray-800 rounded-xl border border-gray-700 mb-6 {% if open_group and open_group|int == g.id %}open{% elif not open_group and loop.first %}open{% endif %}">
+                <div class="monitor-group bg-gray-800 rounded-xl border border-gray-700 mb-6 {% if open_group and open_group|int == g.id %}open{% endif %}">
                     <button type="button" class="monitor-group-header" onclick="toggleMonitorGroup(this)">
                         <div class="flex items-center gap-3">
                             <span class="px-2 py-1 rounded text-xs {% if g.type == 'whale' %}bg-purple-900 text-purple-200{% else %}bg-blue-900 text-blue-200{% endif %}">
