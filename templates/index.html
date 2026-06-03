@@ -989,19 +989,6 @@
             }
         }
 
-    <!-- 剪贴板复制提示框（位于屏幕中央） -->
-    <div id="toast" class="hidden fixed inset-0 flex items-center justify-center z-50 pointer-events-none">
-        <div class="bg-gray-900/90 border border-gray-700 text-white px-6 py-3 rounded-xl flex items-center gap-3 shadow-2xl transition-all duration-300">
-            <div class="w-6 h-6 bg-green-600 rounded-full flex items-center justify-center text-xs text-white">
-                <i class="fas fa-check"></i>
-            </div>
-            <span class="text-sm font-medium">已添加到剪贴板</span>
-        </div>
-    </div>
-
-    <script>
-        // ... 原 JS 逻辑保持不变 ...
-
         // 复制完整地址核心函数（兼容 HTTP 非安全上下文与 HTTPS）
         function copyToClipboard(text) {
             if (navigator.clipboard && window.isSecureContext) {
@@ -1052,5 +1039,15 @@
         refreshStatusCards();
         setInterval(refreshStatusCards, 1000);
     </script>
+
+    <!-- 剪贴板复制提示框（位于屏幕中央） -->
+    <div id="toast" class="hidden fixed inset-0 flex items-center justify-center z-50 pointer-events-none">
+        <div class="bg-gray-900/90 border border-gray-700 text-white px-6 py-3 rounded-xl flex items-center gap-3 shadow-2xl transition-all duration-300">
+            <div class="w-6 h-6 bg-green-600 rounded-full flex items-center justify-center text-xs text-white">
+                <i class="fas fa-check"></i>
+            </div>
+            <span class="text-sm font-medium">已添加到剪贴板</span>
+        </div>
+    </div>
 </body>
 </html>
