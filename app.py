@@ -755,7 +755,7 @@ def handle_tg_callback(bot_token, callback_query):
         # 降级备用：使用 Telegram 附带的纯文本并进行 HTML 转义以防止标签解析报错
         original_text = html.escape(message.get("text") or "")
     
-    # 3. 建立独立、隔离的链上连接（不共享扫描连接，设置 5 秒超时保护）
+    # 3. 建立独立、隔离的链上连接（不共享扫描连接，设置 10 秒超时保护）
     dwellir_wss = db.get_setting("query_wss", "").strip()
     if not dwellir_wss:
         dwellir_wss = db.get_setting("dwellir_wss", "wss://api-bittensor-mainnet.n.dwellir.com").strip()
@@ -766,7 +766,7 @@ def handle_tg_callback(bot_token, callback_query):
     try:
         # 复用全局线程池 QUERY_EXECUTOR 提交，防止重复创建线程池开销
         future = QUERY_EXECUTOR.submit(_query_blockchain_data, dwellir_wss, address, netuid)
-        free_tao, alpha_stake, equivalent_tao, price = future.result(timeout=5.0)
+        free_tao, alpha_stake, equivalent_tao, price = future.result(timeout=10.0)
         
         duration_ms = int((time.perf_counter() - start_time) * 1000)
         db.add_log("INFO", f"仓位查询完成: 用时 {duration_ms}ms, 目标: {address}, 子网: {netuid}")
@@ -784,7 +784,7 @@ def handle_tg_callback(bot_token, callback_query):
         edit_message_text(bot_token, chat_id, message_id, original_text, balance_info, message.get("reply_markup"))
         
     except concurrent.futures.TimeoutError:
-        db.add_log("ERROR", "执行 Webhook 链上余额查询超时 (5秒)")
+        db.add_log("ERROR", "执行 Webhook 链上余额查询超时 (10秒)")
         edit_message_text(bot_token, chat_id, message_id, original_text, "\n\n❌ 当前仓位查询超时，请稍后再试", message.get("reply_markup"))
     except Exception as e:
         db.add_log("ERROR", f"执行 Webhook 链上余额查询时发生异常: {str(e)}")
