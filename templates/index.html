@@ -640,7 +640,7 @@
                                         <span class="wallet-alias font-bold">{{ w.alias }}</span>
                                         <span class="wallet-address text-gray-500 font-mono flex items-center gap-1.5 mt-0.5">
                                             <span>{{ w.address[:10] }}...{{ w.address[-4:] }}</span>
-                                            <button type="button" onclick="copyToClipboard({{ w.address | tojson }})" class="text-gray-400 hover:text-blue-400 focus:outline-none transition-colors" title="复制完整地址">
+                                            <button type="button" data-address="{{ w.address | e }}" onclick="copyWalletAddress(this)" class="text-gray-400 hover:text-blue-400 focus:outline-none transition-colors" title="复制完整地址">
                                                 <i class="far fa-copy"></i>
                                             </button>
                                         </span>
@@ -986,6 +986,14 @@
             } catch (err) {
                 resultEl.textContent = `连接失败: ${err}`;
                 resultEl.className = 'text-xs mt-2 text-red-400 break-all';
+            }
+        }
+
+        // 复制按钮的事件包装函数
+        function copyWalletAddress(btn) {
+            const address = btn.getAttribute('data-address');
+            if (address) {
+                copyToClipboard(address);
             }
         }
 
