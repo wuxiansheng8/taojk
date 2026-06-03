@@ -189,13 +189,14 @@ def profile_url(address):
 
 def build_inline_keyboard(tx_ref=None, netuid=None, address=None):
     buttons = []
-    subnet_link = subnet_url(netuid)
     profile_link = profile_url(address)
 
-    if subnet_link:
-        buttons.append({"text": "查看子网详情", "url": subnet_link})
     if profile_link:
-        buttons.append({"text": "查看操作者钱包", "url": profile_link})
+        buttons.append({"text": "💰 查看操作者钱包", "url": profile_link})
+
+    if address and netuid is not None:
+        query_btn = {"text": "🔍 查当前子网仓位", "callback_data": f"qb:{netuid}:{address}"}
+        return {"inline_keyboard": [[query_btn] + buttons]}
 
     if not buttons:
         return None
@@ -560,7 +561,7 @@ def alert_from_evm_stake_transfer(events, tx_ref=None, tx_hash=None):
             return True
 
         if is_root_netuid(origin_netuid) and not is_root_netuid(destination_netuid):
-            added_tao, _ = stake_added_amounts(events, entry["to_account"], hotkey, destination_netuid)
+            added_tao, added_alpha = stake_added_amounts(events, entry["to_account"], hotkey, destination_netuid)
             if added_tao is not None:
                 tao_amount = added_tao
             check_and_alert(
@@ -573,6 +574,7 @@ def alert_from_evm_stake_transfer(events, tx_ref=None, tx_hash=None):
                 threshold_amount=tao_amount,
                 tx_ref=tx_ref,
                 tx_hash=tx_hash,
+                alpha_amount=added_alpha,
             )
             return True
 
@@ -592,6 +594,7 @@ def alert_from_evm_stake_transfer(events, tx_ref=None, tx_hash=None):
             threshold_amount=added["tao_amount"],
             tx_ref=tx_ref,
             tx_hash=tx_hash,
+            alpha_amount=added.get("alpha_amount"),
         )
         return True
 
@@ -901,6 +904,7 @@ def build_alert_message(
     alias_from=None,
     alias_to=None,
     group_type=None,
+    alpha_amount=None,
 ):
     if action == TEXT["transfer"]:
         if group_type == "wallet":
@@ -924,6 +928,27 @@ def build_alert_message(
     if action == TEXT["move_stake"]:
         icon = "🟡"
 
+    swap_detail = ""
+    if action in {TEXT["add_stake"], TEXT["remove_stake"], TEXT["move_stake"]}:
+        alpha_val = None
+        tao_val = None
+        if action == TEXT["add_stake"]:
+            tao_val = amount
+            alpha_val = alpha_amount
+        else:
+            alpha_val = amount
+            tao_val = received_tao
+
+        if alpha_val is not None and tao_val is not None and alpha_val > 0:
+            price = tao_val / alpha_val
+            if action == TEXT["move_stake"]:
+                origin_netuid = netuid
+                if netuid and "->" in str(netuid):
+                    origin_netuid = str(netuid).split("->")[0]
+                swap_detail = f"<code>{alpha_val:.2f}α ⇄ {tao_val:.6f}𝞃</code>\n折算单价(SN{safe_text(format_netuid(origin_netuid))})≈ <code>{price:.6f}𝞃</code>\n"
+            else:
+                swap_detail = f"<code>{alpha_val:.2f}α ⇄ {tao_val:.6f}𝞃</code>\n单价alpha(SN{safe_text(format_netuid(netuid))})≈ <code>{price:.6f}𝞃</code>\n"
+
     # 钱包监控组
     if group_type == "wallet":
         msg = f"{icon} <b>{safe_text(action)} SN{safe_text(format_netuid(netuid))}</b>\n"
@@ -936,7 +961,9 @@ def build_alert_message(
             msg += f" 备注：{safe_text(alias_address)}\n"
 
         msg += f"🏠 操作者: <code>{safe_text(short_address(address))}</code>\n"
-        if detail:
+        if swap_detail:
+            msg += swap_detail
+        elif detail:
             msg += f"🔥 热钱包: <code>{safe_text(short_address(detail))}</code>\n"
             
         msg += f"📍 子网{safe_text(format_netuid(netuid))} "
@@ -952,7 +979,9 @@ def build_alert_message(
         msg += f"{icon} Swap {amount:.4f} {unit}\n\n"
 
     msg += f"🏠 操作者: <code>{safe_text(short_address(address))}</code>\n"
-    if detail:
+    if swap_detail:
+        msg += swap_detail
+    elif detail:
         msg += f"🔥 热钱包: <code>{safe_text(short_address(detail))}</code>\n"
     msg += f"\n📍 子网{safe_text(format_netuid(netuid))} "
 
@@ -975,6 +1004,7 @@ def check_and_alert(
     fee_tao=None,
     tx_ref=None,
     tx_hash=None,
+    alpha_amount=None,
 ):
     groups = db.get_groups()
 
@@ -1030,6 +1060,7 @@ def check_and_alert(
             alias_from=alias_from,
             alias_to=alias_to,
             group_type=group.get("type"),
+            alpha_amount=alpha_amount,
         )
         reply_markup = None
         if action != TEXT["transfer"]:
@@ -1109,6 +1140,7 @@ def alert_from_stake_events(events, tx_ref=None, tx_hash=None):
             account = normalize_address(attr_value(attrs, ("coldkey", "account"), 0))
             hotkey = normalize_address(attr_value(attrs, ("hotkey",), 1))
             tao_amount = to_float_tao(attr_value(attrs, ("tao_amount", "amount"), 2))
+            alpha_amount = to_float_tao(attr_value(attrs, ("alpha_amount",), 3)) or 0
             netuid = attr_value(attrs, ("netuid",), 4)
             if is_root_netuid(netuid) or tao_amount is None:
                 continue
@@ -1122,6 +1154,7 @@ def alert_from_stake_events(events, tx_ref=None, tx_hash=None):
                 threshold_amount=tao_amount,
                 tx_ref=tx_ref,
                 tx_hash=tx_hash,
+                alpha_amount=alpha_amount,
             )
 
 def handle_call(call, signer, events=None, tx_ref=None, tx_hash=None):
@@ -1152,7 +1185,7 @@ def handle_call(call, signer, events=None, tx_ref=None, tx_hash=None):
         netuid = get_call_arg(call, ("netuid",), 1)
         if is_root_netuid(netuid):
             return
-        event_tao, _ = stake_added_amounts(events, signer, hotkey, netuid)
+        event_tao, event_alpha = stake_added_amounts(events, signer, hotkey, netuid)
         if event_tao is None:
             db.add_log("WARN", f"跳过无 StakeAdded 成功事件的加仓交易: {tx_ref or 'unknown'}")
             return
@@ -1167,6 +1200,7 @@ def handle_call(call, signer, events=None, tx_ref=None, tx_hash=None):
             threshold_amount=amount_tao,
             tx_ref=tx_ref,
             tx_hash=tx_hash,
+            alpha_amount=event_alpha,
         )
         return
 
@@ -1278,7 +1312,10 @@ def handle_call(call, signer, events=None, tx_ref=None, tx_hash=None):
 
         if is_root_netuid(origin_netuid) and not is_root_netuid(destination_netuid):
             amount_rao = get_call_arg(call, ("tao_amount", "amount"), 3)
-            amount_tao = format_tao(amount_rao)
+            amount_tao = format_tao(amount_rao) if amount_rao is not None else 0
+            added_tao, added_alpha = stake_added_amounts(events, signer, hotkey, destination_netuid)
+            if added_tao is not None:
+                amount_tao = added_tao
             check_and_alert(
                 TEXT["add_stake"],
                 signer,
@@ -1289,6 +1326,7 @@ def handle_call(call, signer, events=None, tx_ref=None, tx_hash=None):
                 threshold_amount=amount_tao,
                 tx_ref=tx_ref,
                 tx_hash=tx_hash,
+                alpha_amount=added_alpha,
             )
 
 def process_block(substrate, block_hash, block, block_number=None):

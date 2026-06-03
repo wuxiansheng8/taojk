@@ -897,6 +897,16 @@
                                     <input type="number" name="tg_throttle_ms" value="{{ settings.tg_throttle_ms }}" class="w-full bg-gray-900 border border-gray-700 rounded p-3 text-sm focus:border-blue-500 focus:outline-none shadow-inner">
                                     <p class="text-xs text-gray-500 mt-2">当短时间内交易量激增时，此参数可防止触发 TG 的 429 报错。</p>
                                 </div>
+                                <div>
+                                    <label class="block text-sm font-bold mb-2">公网基础 URL (例如: https://domain.com)</label>
+                                    <input type="text" name="public_url" value="{{ settings.public_url or '' }}" placeholder="https://your-domain.com" class="w-full bg-gray-900 border border-gray-700 rounded p-3 text-sm focus:border-blue-500 focus:outline-none shadow-inner">
+                                    <p class="text-xs text-gray-500 mt-2">系统将自动向 Telegram 注册 Webhook 接口以支持仓位查询按钮。<b>必须以 https:// 开头</b>（Telegram 仅支持公网 HTTPS 接口，否则按钮回调无法生效）。</p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-bold mb-2">余额查询 WSS (例如: wss://api-bittensor-mainnet.n.dwellir.com)</label>
+                                    <input type="text" name="query_wss" value="{{ settings.query_wss or '' }}" placeholder="wss://api-bittensor-mainnet.n.dwellir.com" class="w-full bg-gray-900 border border-gray-700 rounded p-3 text-sm focus:border-blue-500 focus:outline-none shadow-inner">
+                                    <p class="text-xs text-gray-500 mt-2">点击 Telegram 卡片按钮时，将使用此独立连接查询仓位，避免拖慢或影响后台主扫描器。</p>
+                                </div>
                             </div>
                         </div>
                         <div class="pt-4">

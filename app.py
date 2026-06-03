@@ -5,10 +5,17 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, Form, Depends, HTTPException, status, UploadFile, File
+from fastapi import FastAPI, Request, Form, Depends, HTTPException, status, UploadFile, File, BackgroundTasks
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
+import hashlib
+import requests
+import html
+import concurrent.futures
+
+# 全局查询线程池，避免高频点击时重复新建线程池的开销
+QUERY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
 import database as db
 import scanner
@@ -29,6 +36,9 @@ async def lifespan(app: FastAPI):
     
     # 启动扫描线程
     threading.Thread(target=scanner.start_scanner, daemon=True).start()
+    
+    # 启动后异步自动注册 Webhook
+    register_all_webhooks()
     
     yield
     
@@ -291,7 +301,9 @@ def settings_page(request: Request):
         "dwellir_wss": db.get_setting("dwellir_wss", "wss://api-bittensor-mainnet.n.dwellir.com"),
         "dwellir_wss_backup": db.get_setting("dwellir_wss_backup", ""),
         "wss_load_balance": db.get_setting("wss_load_balance", "0"),
-        "tg_throttle_ms": db.get_setting("tg_throttle_ms", "500")
+        "tg_throttle_ms": db.get_setting("tg_throttle_ms", "500"),
+        "public_url": db.get_setting("public_url", ""),
+        "query_wss": db.get_setting("query_wss", ""),
     }
     uptime_sec = get_uptime_seconds()
     uptime_str = time.strftime('%H:%M:%S', time.gmtime(uptime_sec))
@@ -336,6 +348,7 @@ def update_group(
     )
     # 修改配置成功后，立刻重置内存中旧的 TG 报错状态，确保主页卡片状态实时刷新
     scanner.LAST_TG_ERROR = ""
+    register_all_webhooks()
     return RedirectResponse(f"/monitoring?open_group={id}", status_code=303)
 
 @app.post("/group/rename/{id}")
@@ -390,14 +403,27 @@ def save_sys_settings(
     dwellir_wss_backup: str = Form(""), 
     wss_load_balance: str = Form("0"), 
     tg_throttle_ms: str = Form(...),
+    public_url: str = Form(""),
+    query_wss: str = Form(""),
     csrf_token: str = Form(...)
 ):
     check_login(request)
     verify_csrf(request, csrf_token)
+    
+    public_url_clean = public_url.strip()
+    if public_url_clean and not public_url_clean.lower().startswith("https://"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="公网基础 URL 必须以 https:// 开头，Telegram Webhook 仅支持 HTTPS 地址。"
+        )
+        
     db.set_setting("dwellir_wss", dwellir_wss.strip())
     db.set_setting("dwellir_wss_backup", dwellir_wss_backup.strip())
     db.set_setting("wss_load_balance", "1" if wss_load_balance == "1" else "0")
     db.set_setting("tg_throttle_ms", tg_throttle_ms)
+    db.set_setting("public_url", public_url_clean)
+    db.set_setting("query_wss", query_wss.strip())
+    register_all_webhooks()
     return RedirectResponse("/settings", status_code=303)
 
 @app.post("/test_tg/{group_id}")
@@ -516,6 +542,285 @@ def import_wallets(request: Request, file: UploadFile = File(...), csrf_token: s
 
     db.execute_write_returning(operation)
     return RedirectResponse("/monitoring", status_code=303)
+
+# --- Telegram Webhook Helper Functions ---
+
+def extract_numeric_value(obj):
+    """提取 Substrate 节点返回数据中各种嵌套类型的数值 (兼容 dict/U64/ScaleObj 等)"""
+    if obj is None:
+        return 0.0
+    if isinstance(obj, (int, float)):
+        return float(obj)
+    if isinstance(obj, dict):
+        if 'bits' in obj:
+            return float(obj['bits'])
+        if 'value' in obj:
+            return extract_numeric_value(obj['value'])
+    if hasattr(obj, 'value'):
+        return extract_numeric_value(obj.value)
+    return 0.0
+
+def register_webhook(bot_token, public_url):
+    if not bot_token or not public_url:
+        return
+    token_hash = hashlib.md5(bot_token.encode("utf-8")).hexdigest()
+    # 生成安全的 Webhook 验证 Secret Token
+    secret_token = hashlib.sha256((bot_token + session_secret).encode("utf-8")).hexdigest()
+    url = public_url.strip().rstrip('/')
+    webhook_url = f"{url}/tg/webhook/{token_hash}"
+    api_url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
+    try:
+        res = requests.post(api_url, json={"url": webhook_url, "secret_token": secret_token}, timeout=5)
+        if res.ok:
+            db.add_log("INFO", f"TG 机器人 Webhook 注册成功: {token_hash[:8]}...")
+        else:
+            db.add_log("ERROR", f"TG 机器人 Webhook 注册失败 ({res.status_code}): {res.text[:200]}")
+    except Exception as e:
+        db.add_log("ERROR", f"TG 机器人 Webhook 注册发生异常: {str(e)}")
+
+def register_all_webhooks():
+    public_url = db.get_setting("public_url", "").strip()
+    if not public_url:
+        db.add_log("INFO", "未配置公网 URL，跳过 TG Webhook 注册")
+        return
+    
+    tokens = set()
+    groups = db.get_groups()
+    for g in groups:
+        if g.get("tg_token"):
+            tokens.add(g["tg_token"].strip())
+        if g.get("tg_token_backup"):
+            tokens.add(g["tg_token_backup"].strip())
+            
+    for token in tokens:
+        threading.Thread(target=register_webhook, args=(token, public_url), daemon=True).start()
+
+def edit_message_text(bot_token, chat_id, message_id, original_text, append_text, reply_markup=None):
+    # 定义切割标识符，避免多次重复点击时追加多个旧仓位或报错区块
+    markers = [
+        "\n\n💰 <b>当前操作者仓位</b>",
+        "\n\n💰 <b>剩余可用:</b>",
+        "\n\n💰 剩余可用:",
+        "\n\n❌ 当前仓位查询超时",
+        "\n\n❌ 查询超时",
+        "\n\n❌ 节点"
+    ]
+    for marker in markers:
+        if marker in original_text:
+            original_text = original_text.split(marker)[0]
+        
+    new_text = original_text + append_text
+    url = f"https://api.telegram.org/bot{bot_token}/editMessageText"
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": new_text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+        
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        db.add_log("ERROR", f"编辑 TG 消息失败: {str(e)}")
+
+def _query_blockchain_data(dwellir_wss, address, netuid):
+    from substrateinterface import SubstrateInterface
+    substrate = None
+    try:
+        substrate = SubstrateInterface(url=dwellir_wss, ws_options={"timeout": 5})
+        
+        # A. 查询可用 TAO 余额
+        account_info = substrate.query(
+            module="System",
+            storage_function="Account",
+            params=[address]
+        )
+        free_tao = 0.0
+        if account_info:
+            val_dict = account_info.value if hasattr(account_info, "value") else account_info
+            if isinstance(val_dict, dict):
+                free_tao = float(val_dict.get("data", {}).get("free", 0)) / 1e9
+            
+        # B. 聚合当前冷钱包在此子网上的 Alpha 质押余额（采用 O(1) 按 Key 精确点对点查询，代替 query_map 扫链）
+        alpha_stake = 0.0
+        try:
+            # 查出该 coldkey 关联的所有 active staking hotkeys
+            hotkeys_obj = substrate.query("SubtensorModule", "StakingHotkeys", [address])
+            hotkeys = hotkeys_obj.value if hasattr(hotkeys_obj, 'value') else hotkeys_obj
+            
+            if isinstance(hotkeys, list) and len(hotkeys) > 0:
+                for hk in hotkeys:
+                    hk_str = hk[0] if isinstance(hk, (list, tuple)) else hk
+                    
+                    val = 0.0
+                    # 依次查找新旧版本 Alpha 存储
+                    for storage_name in ("Alpha", "AlphaV2"):
+                        try:
+                            alpha_obj = substrate.query("SubtensorModule", storage_name, [hk_str, address, int(netuid)])
+                            if alpha_obj is not None:
+                                val = extract_numeric_value(alpha_obj)
+                                break
+                        except Exception:
+                            continue
+                            
+                    # 备用回退到旧版 Stake 字段
+                    if val == 0.0:
+                        try:
+                            stake_obj = substrate.query("SubtensorModule", "Stake", [hk_str, address])
+                            if stake_obj is not None:
+                                val = extract_numeric_value(stake_obj)
+                        except Exception:
+                            pass
+                            
+                    alpha_stake += val / 1e9
+        except Exception as e:
+            db.add_log("ERROR", f"按 Key 点对点查询 Alpha 余额时出错: {str(e)}")
+            
+        # C. 查询子网池以估算 Alpha 价值的 TAO 数量（修复表名：SubnetTA -> SubnetTAO）
+        equivalent_tao = None
+        price = None
+        try:
+            tao_pool_obj = substrate.query("SubtensorModule", "SubnetTAO", [int(netuid)])
+            alpha_pool_obj = substrate.query("SubtensorModule", "SubnetAlphaIn", [int(netuid)])
+            
+            tao_pool = extract_numeric_value(tao_pool_obj)
+            alpha_pool = extract_numeric_value(alpha_pool_obj)
+            
+            if alpha_pool > 0:
+                price = tao_pool / alpha_pool
+                equivalent_tao = alpha_stake * price
+        except Exception as e:
+            db.add_log("ERROR", f"估算 Alpha 折算 TAO 时出错: {str(e)}")
+            
+        return free_tao, alpha_stake, equivalent_tao, price
+    finally:
+        if substrate:
+            try:
+                substrate.close()
+            except Exception:
+                pass
+
+def handle_tg_callback(bot_token, callback_query):
+    callback_id = callback_query.get("id")
+    callback_data = callback_query.get("data", "")
+    message = callback_query.get("message")
+    if not message:
+        return
+        
+    chat_id = message["chat"]["id"]
+    message_id = message["message_id"]
+    
+    # 1. 立即回复 Telegram 消除转圈
+    ans_url = f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery"
+    try:
+        requests.post(ans_url, json={"callback_query_id": callback_id}, timeout=5)
+    except Exception:
+        pass
+        
+    # 2. 解析 callback_data: qb:{netuid}:{address}
+    parts = callback_data.split(":")
+    if len(parts) < 3:
+        return
+    netuid = parts[1]
+    address = parts[2]
+    
+    # 为了避免 message.text 丢失 HTML 格式标签，优先从审计日志中查找原始 HTML 消息
+    original_text = ""
+    try:
+        conn = db.get_db()
+        row = conn.execute(
+            "SELECT message FROM notification_audit_logs "
+            "WHERE (address = ? OR from_address = ? OR to_address = ?) AND netuid = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (address, address, address, str(netuid))
+        ).fetchone()
+        conn.close()
+        if row and row["message"]:
+            original_text = row["message"]
+    except Exception as e:
+        db.add_log("WARN", f"从审计日志获取 HTML 原始消息出错: {str(e)}")
+        
+    if not original_text:
+        # 降级备用：使用 Telegram 附带的纯文本并进行 HTML 转义以防止标签解析报错
+        original_text = html.escape(message.get("text") or "")
+    
+    # 3. 建立独立、隔离的链上连接（不共享扫描连接，设置 5 秒超时保护）
+    dwellir_wss = db.get_setting("query_wss", "").strip()
+    if not dwellir_wss:
+        dwellir_wss = db.get_setting("dwellir_wss", "wss://api-bittensor-mainnet.n.dwellir.com").strip()
+    if not dwellir_wss:
+        dwellir_wss = "wss://api-bittensor-mainnet.n.dwellir.com"
+        
+    start_time = time.perf_counter()
+    try:
+        # 复用全局线程池 QUERY_EXECUTOR 提交，防止重复创建线程池开销
+        future = QUERY_EXECUTOR.submit(_query_blockchain_data, dwellir_wss, address, netuid)
+        free_tao, alpha_stake, equivalent_tao, price = future.result(timeout=5.0)
+        
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+        db.add_log("INFO", f"仓位查询完成: 用时 {duration_ms}ms, 目标: {address}, 子网: {netuid}")
+        
+        balance_info = (
+            f"\n\n💰 <b>当前操作者仓位</b>\n"
+            f"剩余可用: <code>{free_tao:.4f} T</code>\n"
+            f"SN{netuid} 总 Alpha: <code>{alpha_stake:.4f}</code>"
+        )
+        if price is not None:
+            balance_info += f"\n当前 Alpha 价格: <code>1 Alpha ≈ {price:.4f} T</code>"
+        if equivalent_tao is not None:
+            balance_info += f"\n折合: <code>≈ {equivalent_tao:.4f} T</code>"
+        
+        edit_message_text(bot_token, chat_id, message_id, original_text, balance_info, message.get("reply_markup"))
+        
+    except concurrent.futures.TimeoutError:
+        db.add_log("ERROR", "执行 Webhook 链上余额查询超时 (5秒)")
+        edit_message_text(bot_token, chat_id, message_id, original_text, "\n\n❌ 当前仓位查询超时，请稍后再试", message.get("reply_markup"))
+    except Exception as e:
+        db.add_log("ERROR", f"执行 Webhook 链上余额查询时发生异常: {str(e)}")
+        edit_message_text(bot_token, chat_id, message_id, original_text, "\n\n❌ 当前仓位查询超时，请稍后再试", message.get("reply_markup"))
+
+@app.post("/tg/webhook/{token_md5}")
+async def tg_webhook(token_md5: str, request: Request, background_tasks: BackgroundTasks):
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "Invalid JSON"}, status_code=400)
+    
+    callback_query = payload.get("callback_query")
+    if not callback_query:
+        return JSONResponse({"ok": True})
+        
+    callback_data = callback_query.get("data", "")
+    if not callback_data.startswith("qb:"):
+        return JSONResponse({"ok": True})
+        
+    # 查找 bot_token 鉴权
+    groups = db.get_groups()
+    bot_token = None
+    for g in groups:
+        for key in ("tg_token", "tg_token_backup"):
+            val = g.get(key)
+            if val and hashlib.md5(val.strip().encode("utf-8")).hexdigest() == token_md5:
+                bot_token = val.strip()
+                break
+        if bot_token:
+            break
+            
+    if not bot_token:
+        return JSONResponse({"ok": False, "error": "Unauthorized bot token"}, status_code=401)
+        
+    # 安全防护：校验 Telegram secret_token 报头，确保请求来自于真实 Telegram API
+    received_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+    expected_secret = hashlib.sha256((bot_token + session_secret).encode("utf-8")).hexdigest()
+    if received_secret != expected_secret:
+        db.add_log("WARN", f"TG Webhook 鉴权失败: Secret Token 不匹配")
+        return JSONResponse({"ok": False, "error": "Unauthorized secret token"}, status_code=403)
+        
+    background_tasks.add_task(handle_tg_callback, bot_token, callback_query)
+    return JSONResponse({"ok": True})
 
 if __name__ == "__main__":
     import uvicorn
