@@ -92,13 +92,7 @@ def get_runtime_status():
     configured_tg = [g for g in groups if g.get("tg_token") and g.get("tg_chat_id")]
     missing_tg = [g for g in groups if not g.get("tg_token") or not g.get("tg_chat_id")]
 
-    conn = db.get_db()
-    latest_tg_error = conn.execute(
-        "SELECT message, created_at FROM system_logs "
-        "WHERE message LIKE 'TG %' AND created_at >= datetime('now', '-30 minutes') "
-        "ORDER BY created_at DESC LIMIT 1"
-    ).fetchone()
-    conn.close()
+    # 彻底弃用通过 system_logs 判定健康状态的旧逻辑，改用内存中 LAST_TG_ERROR 的实时判定
 
     if scanner.LAST_CONNECT_TIME > 0:
         wss_label = f"WSS 已连接 ({scanner.CURRENT_WSS_LABEL})" if scanner.CURRENT_WSS_LABEL else "WSS 已连接"
@@ -116,14 +110,11 @@ def get_runtime_status():
         last_scan_label = "暂无扫描"
         last_scan_detail = "启动后收到新区块才会显示"
 
+    # 仅使用内存中的 LAST_TG_ERROR 判定异常（与 WSS 监控状态逻辑保持一致）
     if scanner.LAST_TG_ERROR:
         tg_label = "Telegram 推送异常"
         tg_ok = False
         tg_detail = scanner.LAST_TG_ERROR
-    elif latest_tg_error:
-        tg_label = "Telegram 推送异常"
-        tg_ok = False
-        tg_detail = latest_tg_error["message"]
     elif missing_tg:
         tg_label = "Telegram 配置不完整"
         tg_ok = False
@@ -343,6 +334,8 @@ def update_group(
             id,
         )
     )
+    # 修改配置成功后，立刻重置内存中旧的 TG 报错状态，确保主页卡片状态实时刷新
+    scanner.LAST_TG_ERROR = ""
     return RedirectResponse(f"/monitoring?open_group={id}", status_code=303)
 
 @app.post("/group/rename/{id}")
