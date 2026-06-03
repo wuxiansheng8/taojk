@@ -638,7 +638,12 @@
                                 <div class="wallet-item flex justify-between items-center bg-gray-800 rounded text-xs">
                                     <div class="flex flex-col">
                                         <span class="wallet-alias font-bold">{{ w.alias }}</span>
-                                        <span class="wallet-address text-gray-500 font-mono">{{ w.address[:10] }}...{{ w.address[-4:] }}</span>
+                                        <span class="wallet-address text-gray-500 font-mono flex items-center gap-1.5 mt-0.5">
+                                            <span>{{ w.address[:10] }}...{{ w.address[-4:] }}</span>
+                                            <button type="button" onclick="copyToClipboard({{ w.address | tojson }})" class="text-gray-400 hover:text-blue-400 focus:outline-none transition-colors" title="复制完整地址">
+                                                <i class="far fa-copy"></i>
+                                            </button>
+                                        </span>
                                     </div>
                                     <div class="flex items-center gap-3">
                                         <!-- 安全优化：GET 切换链接改 POST 触发 -->
@@ -982,6 +987,34 @@
                 resultEl.textContent = `连接失败: ${err}`;
                 resultEl.className = 'text-xs mt-2 text-red-400 break-all';
             }
+        }
+
+    <!-- 剪贴板复制提示框（位于屏幕中央） -->
+    <div id="toast" class="hidden fixed inset-0 flex items-center justify-center z-50 pointer-events-none">
+        <div class="bg-gray-900/90 border border-gray-700 text-white px-6 py-3 rounded-xl flex items-center gap-3 shadow-2xl transition-all duration-300">
+            <div class="w-6 h-6 bg-green-600 rounded-full flex items-center justify-center text-xs text-white">
+                <i class="fas fa-check"></i>
+            </div>
+            <span class="text-sm font-medium">已添加到剪贴板</span>
+        </div>
+    </div>
+
+    <script>
+        // ... 原 JS 逻辑保持不变 ...
+
+        // 新增的复制完整地址核心函数
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                const toast = document.getElementById('toast');
+                if (toast) {
+                    toast.classList.remove('hidden');
+                    setTimeout(() => {
+                        toast.classList.add('hidden');
+                    }, 1500);
+                }
+            }).catch(err => {
+                console.error('Failed to copy: ', err);
+            });
         }
 
         refreshStatusCards();

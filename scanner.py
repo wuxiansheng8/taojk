@@ -46,6 +46,14 @@ LAST_TG_SUCCESS_TIME = 0
 LAST_TG_ERROR = ""
 CONSECUTIVE_HANDLER_ERRORS = 0  # 追踪处理连续错误的次数
 
+def mask_chat_id(cid):
+    cid_str = str(cid or "")
+    if not cid_str:
+        return ""
+    if len(cid_str) > 8:
+        return f"{cid_str[:4]}***{cid_str[-4:]}"
+    return cid_str
+
 # --- 跨平台文件排他锁实现 (扫描进程单例保护) ---
 _lock_file = None
 
@@ -663,15 +671,17 @@ def _safe_retry_after(value):
 
 def _load_tg_target(group_id, bot_token=None, chat_id=None):
     conn = db.get_db()
-    group = conn.execute(
-        "SELECT tg_token, tg_chat_id, tg_token_backup, tg_chat_id_backup, split_stake_bots FROM monitor_groups WHERE id = ?",
+    group_row = conn.execute(
+        "SELECT name, tg_token, tg_chat_id, tg_token_backup, tg_chat_id_backup, split_stake_bots FROM monitor_groups WHERE id = ?",
         (group_id,)
     ).fetchone()
     conn.close()
 
-    if not group:
+    if not group_row:
         return None, None, None, f"监控分组不存在: {group_id}"
 
+    # 转换为标准字典，保障 get() 调用的安全性
+    group = dict(group_row)
     bot_token = bot_token or group["tg_token"]
     chat_id = chat_id or group["tg_chat_id"]
     if not bot_token or not chat_id:
@@ -691,12 +701,25 @@ def _update_migrated_chat_id(group_id, group, old_chat_id, migrated_chat_id):
 def send_telegram_msg_to_group_now(group_id, msg, audit_id=None, reply_markup=None, bot_token=None, chat_id=None, allow_retry=True):
     global LAST_SEND_TIME, LAST_TG_SUCCESS_TIME, LAST_TG_ERROR
 
+    # _load_tg_target 返回的 bot_token 和 chat_id 已经是兜底解析后的实际值
     group, bot_token, chat_id, error = _load_tg_target(group_id, bot_token, chat_id)
+    
+    # 优雅获取分组名称并带兜底
+    group_name = (group.get("name") if group else "") or f"分组-{group_id}"
+    
+    # 动态匹配主/备机器人
+    bot_slot = "主机器人"
+    if group and bot_token and bot_token == group.get("tg_token_backup"):
+        bot_slot = "热备机器人"
+        
+    masked_cid = mask_chat_id(chat_id)
+    bot_info = f"分组 [{group_name}] / {bot_slot} / Chat ID: {masked_cid}"
+
     if error:
-        LAST_TG_ERROR = error
+        LAST_TG_ERROR = f"{bot_info} {error}"
         if audit_id:
             db.update_notification_audit_log(audit_id, "failed", error)
-        db.add_log("ERROR", f"TG 发送失败: {error}")
+        db.add_log("ERROR", f"TG 发送失败，{bot_info}: {error}")
         return False, error
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -714,10 +737,10 @@ def send_telegram_msg_to_group_now(group_id, msg, audit_id=None, reply_markup=No
         LAST_SEND_TIME = time.time()
     except Exception as e:
         error = str(e)
-        LAST_TG_ERROR = error
+        LAST_TG_ERROR = f"{bot_info} 网络异常: {error}"
         if audit_id:
             db.update_notification_audit_log(audit_id, "failed", error[:500])
-        db.add_log("ERROR", f"TG 网络异常: {error}")
+        db.add_log("ERROR", f"TG 网络异常，{bot_info}: {error}")
         return False, error
 
     if res.status_code == 429:
@@ -726,10 +749,10 @@ def send_telegram_msg_to_group_now(group_id, msg, audit_id=None, reply_markup=No
         except Exception:
             retry_after = 5
         error = f"429 retry_after={retry_after}"
-        LAST_TG_ERROR = error
+        LAST_TG_ERROR = f"{bot_info} {error}"
         if audit_id:
             db.update_notification_audit_log(audit_id, "retrying" if allow_retry else "failed", error)
-        db.add_log("WARN", f"TG 频率限制，需要等待 {retry_after} 秒")
+        db.add_log("WARN", f"TG 频率限制，{bot_info}，需要等待 {retry_after} 秒")
         return False, error
 
     if not res.ok:
@@ -743,7 +766,7 @@ def send_telegram_msg_to_group_now(group_id, msg, audit_id=None, reply_markup=No
             _update_migrated_chat_id(group_id, group, chat_id, migrate_to_chat_id)
             if audit_id:
                 db.update_notification_audit_log(audit_id, "retrying", f"migrate_to_chat_id={migrate_to_chat_id}")
-            db.add_log("WARN", f"TG 群升级为超级群，自动切换 Chat ID -> {migrate_to_chat_id}")
+            db.add_log("WARN", f"TG 群升级为超级群，{bot_info} 自动切换 Chat ID -> {migrate_to_chat_id}")
             return send_telegram_msg_to_group_now(
                 group_id,
                 msg,
@@ -755,10 +778,10 @@ def send_telegram_msg_to_group_now(group_id, msg, audit_id=None, reply_markup=No
             )
 
         error = res.text[:500]
-        LAST_TG_ERROR = error
+        LAST_TG_ERROR = f"{bot_info} 发送失败: {error}"
         if audit_id:
             db.update_notification_audit_log(audit_id, "failed", error)
-        db.add_log("ERROR", f"TG 发送失败: {error}")
+        db.add_log("ERROR", f"TG 发送失败，{bot_info}: {error}")
         return False, error
 
     LAST_TG_ERROR = ""
@@ -771,6 +794,28 @@ def _process_tg_queue_item(item):
     global LAST_SEND_TIME
     max_retries = 3
     attempt = 0
+
+    group_id = item["group_id"]
+    conn = db.get_db()
+    group_row = conn.execute(
+        "SELECT name, tg_token, tg_chat_id, tg_token_backup FROM monitor_groups WHERE id = ?",
+        (group_id,)
+    ).fetchone()
+    conn.close()
+    
+    # 转换为标准字典
+    group_dict = dict(group_row) if group_row else {}
+    group_name = group_dict.get("name") or f"分组-{group_id}"
+    
+    item_bot_token = item.get("bot_token")
+    item_chat_id = item.get("chat_id")
+    
+    bot_slot = "主机器人"
+    if item_bot_token and item_bot_token == group_dict.get("tg_token_backup"):
+        bot_slot = "热备机器人"
+        
+    masked_cid = mask_chat_id(item_chat_id or group_dict.get("tg_chat_id", ""))
+    bot_info = f"分组 [{group_name}] / {bot_slot} / Chat ID: {masked_cid}"
 
     # 原地通过循环方式发送同一条消息，防止 429 报错重回队尾时发生时序错乱
     while attempt < max_retries:
@@ -796,7 +841,7 @@ def _process_tg_queue_item(item):
             retry_after = _safe_retry_after(error.split("=", 1)[1] or 5)
             # 指数级退避重试，限制最大等待时间
             sleep_sec = min(30, retry_after * attempt)
-            db.add_log("WARN", f"TG 推送频率限流，原地等待 {sleep_sec} 秒后进行第 {attempt} 次重试...")
+            db.add_log("WARN", f"TG 推送频率限流，{bot_info}，原地等待 {sleep_sec} 秒后进行第 {attempt} 次重试...")
             time.sleep(sleep_sec)
             continue
         else:
@@ -825,7 +870,17 @@ def tg_worker():
             audit_id = item.get("audit_id") if isinstance(item, dict) else None
             if audit_id:
                 db.update_notification_audit_log(audit_id, "failed", error[:500])
-            db.add_log("ERROR", f"TG Worker 异常: {error}")
+            group_id = item.get("group_id") if isinstance(item, dict) else None
+            group_name = "未知分组"
+            if group_id:
+                conn = db.get_db()
+                g_row = conn.execute("SELECT name FROM monitor_groups WHERE id = ?", (group_id,)).fetchone()
+                conn.close()
+                if g_row:
+                    group_name = g_row["name"]
+            
+            error_msg_log = f"TG Worker 异常，分组 [{group_name}]: {error}"
+            db.add_log("ERROR", error_msg_log)
         finally:
             TG_QUEUE.task_done()
 
