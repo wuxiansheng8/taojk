@@ -17,6 +17,19 @@ import concurrent.futures
 # 全局查询线程池，避免高频点击时重复新建线程池的开销
 QUERY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
+# --- 专属查询长连接及锁机制 ---
+QUERY_SUBSTRATE = None
+QUERY_SUBSTRATE_LOCK = threading.Lock()
+QUERY_IO_LOCK = threading.Lock()
+
+# --- 缓存及并发防抖机制 ---
+QUERY_CACHE = {}
+QUERY_CACHE_LOCK = threading.Lock()
+CACHE_TTL = 30  # 30秒缓存
+
+IN_PROGRESS_QUERIES = set()
+IN_PROGRESS_LOCK = threading.Lock()
+
 import database as db
 import scanner
 
@@ -431,6 +444,17 @@ def save_sys_settings(
     db.set_setting("tg_throttle_ms", tg_throttle_ms)
     db.set_setting("public_url", public_url_clean)
     db.set_setting("query_wss", query_wss.strip())
+    
+    # 重置独立的查询连接，强制下次查询时重新建连
+    global QUERY_SUBSTRATE
+    with QUERY_SUBSTRATE_LOCK:
+        if QUERY_SUBSTRATE:
+            try:
+                QUERY_SUBSTRATE.close()
+            except Exception:
+                pass
+            QUERY_SUBSTRATE = None
+
     register_all_webhooks()
     return RedirectResponse("/settings", status_code=303)
 
@@ -634,108 +658,129 @@ def edit_message_text(bot_token, chat_id, message_id, original_text, append_text
     except Exception as e:
         db.add_log("ERROR", f"编辑 TG 消息失败: {str(e)}")
 
-def _query_blockchain_data(dwellir_wss, address, netuid):
-    from substrateinterface import SubstrateInterface
-    substrate = None
-    try:
-        substrate = SubstrateInterface(url=dwellir_wss, ws_options={"timeout": 5})
-        
-        # A. 查询可用 TAO 余额
-        account_info = substrate.query(
-            module="System",
-            storage_function="Account",
-            params=[address]
-        )
-        free_tao = 0.0
-        if account_info:
-            val_dict = account_info.value if hasattr(account_info, "value") else account_info
-            if isinstance(val_dict, dict):
-                free_tao = float(val_dict.get("data", {}).get("free", 0)) / 1e9
-            
-        # B. 聚合当前冷钱包在此子网上的 Alpha 质押余额（采用 O(1) 按 Key 精确点对点查询，代替 query_map 扫链）
-        alpha_stake = 0.0
-        try:
-            # 查出该 coldkey 关联的所有 active staking hotkeys
-            hotkeys_obj = substrate.query("SubtensorModule", "StakingHotkeys", [address])
-            hotkeys = hotkeys_obj.value if hasattr(hotkeys_obj, 'value') else hotkeys_obj
-            
-            if isinstance(hotkeys, list) and len(hotkeys) > 0:
-                for hk in hotkeys:
-                    hk_str = hk[0] if isinstance(hk, (list, tuple)) else hk
+def get_query_substrate(dwellir_wss):
+    global QUERY_SUBSTRATE
+    if QUERY_SUBSTRATE is None:
+        with QUERY_SUBSTRATE_LOCK:
+            if QUERY_SUBSTRATE is None:
+                from substrateinterface import SubstrateInterface
+                try:
+                    db.add_log("INFO", f"正在初始化独立的常驻余额查询 WSS 连接: {dwellir_wss}")
+                    new_sub = SubstrateInterface(url=dwellir_wss, ws_options={"timeout": 5})
+                    new_sub.get_chain_head()
+                    QUERY_SUBSTRATE = new_sub
+                    db.add_log("INFO", "独立的常驻余额查询 WSS 连接就绪。")
+                except Exception as e:
+                    db.add_log("ERROR", f"初始化独立的常驻余额查询 WSS 连接失败: {str(e)}")
+                    return None
                     
-                    val = 0.0
-                    # 依次查找新旧版本 Alpha 存储
-                    for storage_name in ("Alpha", "AlphaV2"):
-                        try:
-                            alpha_obj = substrate.query("SubtensorModule", storage_name, [hk_str, address, int(netuid)])
-                            if alpha_obj is not None:
-                                val = extract_numeric_value(alpha_obj)
-                                break
-                        except Exception:
-                            continue
-                            
-                    # 备用回退到旧版 Stake 字段
-                    if val == 0.0:
-                        try:
-                            stake_obj = substrate.query("SubtensorModule", "Stake", [hk_str, address])
-                            if stake_obj is not None:
-                                val = extract_numeric_value(stake_obj)
-                        except Exception:
-                            pass
-                            
-                    alpha_stake += val / 1e9
-        except Exception as e:
-            db.add_log("ERROR", f"按 Key 点对点查询 Alpha 余额时出错: {str(e)}")
-            
-        # C. 查询子网池以估算 Alpha 价值的 TAO 数量（修复表名：SubnetTA -> SubnetTAO）
-        equivalent_tao = None
-        price = None
+    if QUERY_SUBSTRATE:
         try:
-            tao_pool_obj = substrate.query("SubtensorModule", "SubnetTAO", [int(netuid)])
-            alpha_pool_obj = substrate.query("SubtensorModule", "SubnetAlphaIn", [int(netuid)])
-            
-            tao_pool = extract_numeric_value(tao_pool_obj)
-            alpha_pool = extract_numeric_value(alpha_pool_obj)
-            
-            if alpha_pool > 0:
-                price = tao_pool / alpha_pool
-                equivalent_tao = alpha_stake * price
+            if not hasattr(QUERY_SUBSTRATE, "websocket") or not QUERY_SUBSTRATE.websocket or not QUERY_SUBSTRATE.websocket.connected:
+                raise Exception("Websocket connection is disconnected")
+        except Exception:
+            with QUERY_SUBSTRATE_LOCK:
+                db.add_log("INFO", "检测到常驻查询连接断开，正在尝试重建...")
+                from substrateinterface import SubstrateInterface
+                try:
+                    try:
+                        QUERY_SUBSTRATE.close()
+                    except Exception:
+                        pass
+                    QUERY_SUBSTRATE = None
+                    new_sub = SubstrateInterface(url=dwellir_wss, ws_options={"timeout": 5})
+                    new_sub.get_chain_head()
+                    QUERY_SUBSTRATE = new_sub
+                    db.add_log("INFO", "重建独立的常驻余额查询 WSS 连接成功。")
+                except Exception as e:
+                    db.add_log("ERROR", f"重建独立的常驻余额查询 WSS 连接失败: {str(e)}")
+                    QUERY_SUBSTRATE = None
+                    
+    return QUERY_SUBSTRATE
+
+def _query_blockchain_data(dwellir_wss, address, netuid):
+    substrate = get_query_substrate(dwellir_wss)
+    is_temp = False
+    
+    if not substrate:
+        from substrateinterface import SubstrateInterface
+        try:
+            substrate = SubstrateInterface(url=dwellir_wss, ws_options={"timeout": 5})
+            is_temp = True
         except Exception as e:
-            db.add_log("ERROR", f"估算 Alpha 折算 TAO 时出错: {str(e)}")
+            db.add_log("ERROR", f"余额查询临时降级建连失败: {str(e)}")
+            raise e
             
-        return free_tao, alpha_stake, equivalent_tao, price
+    try:
+        with QUERY_IO_LOCK:
+            # A. 查询可用 TAO 余额
+            account_info = substrate.query(
+                module="System",
+                storage_function="Account",
+                params=[address]
+            )
+            free_tao = 0.0
+            if account_info:
+                val_dict = account_info.value if hasattr(account_info, "value") else account_info
+                if isinstance(val_dict, dict):
+                    free_tao = float(val_dict.get("data", {}).get("free", 0)) / 1e9
+                
+            # B. 聚合当前冷钱包在此子网上的 Alpha 质押余额
+            alpha_stake = 0.0
+            try:
+                hotkeys_obj = substrate.query("SubtensorModule", "StakingHotkeys", [address])
+                hotkeys = hotkeys_obj.value if hasattr(hotkeys_obj, 'value') else hotkeys_obj
+                
+                if isinstance(hotkeys, list) and len(hotkeys) > 0:
+                    for hk in hotkeys:
+                        hk_str = hk[0] if isinstance(hk, (list, tuple)) else hk
+                        val = 0.0
+                        for storage_name in ("Alpha", "AlphaV2"):
+                            try:
+                                alpha_obj = substrate.query("SubtensorModule", storage_name, [hk_str, address, int(netuid)])
+                                if alpha_obj is not None:
+                                    val = extract_numeric_value(alpha_obj)
+                                    break
+                            except Exception:
+                                continue
+                                
+                        if val == 0.0:
+                            try:
+                                stake_obj = substrate.query("SubtensorModule", "Stake", [hk_str, address])
+                                if stake_obj is not None:
+                                    val = extract_numeric_value(stake_obj)
+                            except Exception:
+                                pass
+                                
+                        alpha_stake += val / 1e9
+            except Exception as e:
+                db.add_log("ERROR", f"按 Key 点对点查询 Alpha 余额时出错: {str(e)}")
+                
+            # C. 查询子网池以估算 Alpha 价值的 TAO 数量
+            equivalent_tao = None
+            price = None
+            try:
+                tao_pool_obj = substrate.query("SubtensorModule", "SubnetTAO", [int(netuid)])
+                alpha_pool_obj = substrate.query("SubtensorModule", "SubnetAlphaIn", [int(netuid)])
+                
+                tao_pool = extract_numeric_value(tao_pool_obj)
+                alpha_pool = extract_numeric_value(alpha_pool_obj)
+                
+                if alpha_pool > 0:
+                    price = tao_pool / alpha_pool
+                    equivalent_tao = alpha_stake * price
+            except Exception as e:
+                db.add_log("ERROR", f"估算 Alpha 折算 TAO 时出错: {str(e)}")
+                
+            return free_tao, alpha_stake, equivalent_tao, price
     finally:
-        if substrate:
+        if is_temp and substrate:
             try:
                 substrate.close()
             except Exception:
                 pass
 
-def handle_tg_callback(bot_token, callback_query):
-    callback_id = callback_query.get("id")
-    callback_data = callback_query.get("data", "")
-    message = callback_query.get("message")
-    if not message:
-        return
-        
-    chat_id = message["chat"]["id"]
-    message_id = message["message_id"]
-    
-    # 1. 立即回复 Telegram 消除转圈
-    ans_url = f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery"
-    try:
-        requests.post(ans_url, json={"callback_query_id": callback_id}, timeout=5)
-    except Exception:
-        pass
-        
-    # 2. 解析 callback_data: qb:{netuid}:{address}
-    parts = callback_data.split(":")
-    if len(parts) < 3:
-        return
-    netuid = parts[1]
-    address = parts[2]
-    
-    # 为了避免 message.text 丢失 HTML 格式标签，优先从审计日志中查找原始 HTML 消息
+def get_original_text(address, netuid, message):
     original_text = ""
     try:
         conn = db.get_db()
@@ -752,43 +797,124 @@ def handle_tg_callback(bot_token, callback_query):
         db.add_log("WARN", f"从审计日志获取 HTML 原始消息出错: {str(e)}")
         
     if not original_text:
-        # 降级备用：使用 Telegram 附带的纯文本并进行 HTML 转义以防止标签解析报错
         original_text = html.escape(message.get("text") or "")
+    return original_text
+
+def format_balance_info(netuid, free_tao, alpha_stake, equivalent_tao, price):
+    balance_info = (
+        f"\n\n💰 <b>当前操作者仓位</b>\n"
+        f"剩余可用: <code>{free_tao:.4f} T</code>\n"
+        f"SN{netuid} 总 Alpha: <code>{alpha_stake:.4f}</code>"
+    )
+    if price is not None:
+        balance_info += f"\n当前 Alpha 价格: <code>1 Alpha ≈ {price:.4f} T</code>"
+    if equivalent_tao is not None:
+        balance_info += f"\n折合: <code>≈ {equivalent_tao:.4f} T</code>"
+    return balance_info
+
+def handle_tg_callback(bot_token, callback_query):
+    callback_id = callback_query.get("id")
+    callback_data = callback_query.get("data", "")
+    message = callback_query.get("message")
+    if not message:
+        return
+        
+    chat_id = message["chat"]["id"]
+    message_id = message["message_id"]
     
-    # 3. 建立独立、隔离的链上连接（不共享扫描连接，设置 10 秒超时保护）
+    # 解析 callback_data: qb:{netuid}:{address}
+    parts = callback_data.split(":")
+    if len(parts) < 3:
+        return
+    netuid = parts[1]
+    address = parts[2]
+    
+    cache_key = (address, netuid)
+    
+    # 1. 检查缓存
+    now = time.time()
+    cached_val = None
+    with QUERY_CACHE_LOCK:
+        if cache_key in QUERY_CACHE:
+            ts, free_tao, alpha_stake, equivalent_tao, price = QUERY_CACHE[cache_key]
+            if now - ts < CACHE_TTL:
+                cached_val = (free_tao, alpha_stake, equivalent_tao, price)
+                
+    if cached_val:
+        free_tao, alpha_stake, equivalent_tao, price = cached_val
+        # 回复 Telegram 消除转圈并提示使用缓存
+        ans_url = f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery"
+        try:
+            requests.post(ans_url, json={"callback_query_id": callback_id, "text": "已获取最新仓位(缓存)"}, timeout=5)
+        except Exception:
+            pass
+            
+        original_text = get_original_text(address, netuid, message)
+        balance_info = format_balance_info(netuid, free_tao, alpha_stake, equivalent_tao, price)
+        edit_message_text(bot_token, chat_id, message_id, original_text, balance_info, message.get("reply_markup"))
+        return
+
+    # 2. 检查是否正在查询中
+    is_in_progress = False
+    with IN_PROGRESS_LOCK:
+        if cache_key in IN_PROGRESS_QUERIES:
+            is_in_progress = True
+        else:
+            IN_PROGRESS_QUERIES.add(cache_key)
+            
+    if is_in_progress:
+        # 发现已有并发请求正在链上查询中，直接通过小气泡提醒用户，不编辑消息也不发起新查询
+        ans_url = f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery"
+        try:
+            requests.post(ans_url, json={
+                "callback_query_id": callback_id,
+                "text": "⏳ 正在为您获取最新仓位，请勿重复点击...",
+                "show_alert": False
+            }, timeout=5)
+        except Exception:
+            pass
+        return
+
+    # 3. 新查询：回复 Telegram 消除转圈，提示正在获取
+    ans_url = f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery"
+    try:
+        requests.post(ans_url, json={"callback_query_id": callback_id, "text": "正在为您获取最新仓位..."}, timeout=5)
+    except Exception:
+        pass
+
+    # 4. 执行链上查询
     dwellir_wss = db.get_setting("query_wss", "").strip()
     if not dwellir_wss:
         dwellir_wss = db.get_setting("dwellir_wss", "wss://api-bittensor-mainnet.n.dwellir.com").strip()
     if not dwellir_wss:
         dwellir_wss = "wss://api-bittensor-mainnet.n.dwellir.com"
         
+    original_text = get_original_text(address, netuid, message)
     start_time = time.perf_counter()
     try:
         # 复用全局线程池 QUERY_EXECUTOR 提交，防止重复创建线程池开销
         future = QUERY_EXECUTOR.submit(_query_blockchain_data, dwellir_wss, address, netuid)
-        free_tao, alpha_stake, equivalent_tao, price = future.result(timeout=10.0)
+        free_tao, alpha_stake, equivalent_tao, price = future.result(timeout=15.0)  # 15秒查询超时
         
+        # 写入缓存
+        with QUERY_CACHE_LOCK:
+            QUERY_CACHE[cache_key] = (time.time(), free_tao, alpha_stake, equivalent_tao, price)
+            
         duration_ms = int((time.perf_counter() - start_time) * 1000)
         db.add_log("INFO", f"仓位查询完成: 用时 {duration_ms}ms, 目标: {address}, 子网: {netuid}")
         
-        balance_info = (
-            f"\n\n💰 <b>当前操作者仓位</b>\n"
-            f"剩余可用: <code>{free_tao:.4f} T</code>\n"
-            f"SN{netuid} 总 Alpha: <code>{alpha_stake:.4f}</code>"
-        )
-        if price is not None:
-            balance_info += f"\n当前 Alpha 价格: <code>1 Alpha ≈ {price:.4f} T</code>"
-        if equivalent_tao is not None:
-            balance_info += f"\n折合: <code>≈ {equivalent_tao:.4f} T</code>"
-        
+        balance_info = format_balance_info(netuid, free_tao, alpha_stake, equivalent_tao, price)
         edit_message_text(bot_token, chat_id, message_id, original_text, balance_info, message.get("reply_markup"))
         
     except concurrent.futures.TimeoutError:
-        db.add_log("ERROR", "执行 Webhook 链上余额查询超时 (10秒)")
+        db.add_log("ERROR", "执行 Webhook 链上余额查询超时 (15秒)")
         edit_message_text(bot_token, chat_id, message_id, original_text, "\n\n❌ 当前仓位查询超时，请稍后再试", message.get("reply_markup"))
     except Exception as e:
         db.add_log("ERROR", f"执行 Webhook 链上余额查询时发生异常: {str(e)}")
         edit_message_text(bot_token, chat_id, message_id, original_text, "\n\n❌ 当前仓位查询超时，请稍后再试", message.get("reply_markup"))
+    finally:
+        with IN_PROGRESS_LOCK:
+            IN_PROGRESS_QUERIES.discard(cache_key)
 
 @app.post("/tg/webhook/{token_md5}")
 async def tg_webhook(token_md5: str, request: Request, background_tasks: BackgroundTasks):

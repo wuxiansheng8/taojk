@@ -195,7 +195,9 @@ def build_inline_keyboard(tx_ref=None, netuid=None, address=None):
         buttons.append({"text": "💰 查看操作者钱包", "url": profile_link})
 
     if address and netuid is not None:
-        query_btn = {"text": "🔍 查当前子网仓位", "callback_data": f"qb:{netuid}:{address}"}
+        # 如果为挪仓 netuid="110->15"，直接提取目标子网 "15" 作为按钮回调子网号
+        query_netuid = str(netuid).split("->")[-1] if "->" in str(netuid) else netuid
+        query_btn = {"text": "🔍 查当前子网仓位", "callback_data": f"qb:{query_netuid}:{address}"}
         return {"inline_keyboard": [[query_btn] + buttons]}
 
     if not buttons:
