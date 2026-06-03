@@ -209,11 +209,19 @@ def api_status(request: Request):
 @app.get("/api/test_wss/{slot}")
 def api_test_wss(request: Request, slot: str):
     check_login(request)
-    if slot not in {"primary", "backup"}:
+    if slot not in {"primary", "backup", "query"}:
         raise HTTPException(status_code=400, detail="invalid slot")
 
-    key = "dwellir_wss" if slot == "primary" else "dwellir_wss_backup"
-    default = "wss://api-bittensor-mainnet.n.dwellir.com" if slot == "primary" else ""
+    if slot == "primary":
+        key = "dwellir_wss"
+        default = "wss://api-bittensor-mainnet.n.dwellir.com"
+    elif slot == "backup":
+        key = "dwellir_wss_backup"
+        default = ""
+    else:
+        key = "query_wss"
+        default = "wss://api-bittensor-mainnet.n.dwellir.com"
+
     raw_url = db.get_setting(key, default).strip()
     if not raw_url:
         raise HTTPException(status_code=400, detail="empty endpoint")

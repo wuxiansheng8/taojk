@@ -904,8 +904,12 @@
                                 </div>
                                 <div>
                                     <label class="block text-sm font-bold mb-2">余额查询 WSS (例如: wss://api-bittensor-mainnet.n.dwellir.com)</label>
-                                    <input type="text" name="query_wss" value="{{ settings.query_wss or '' }}" placeholder="wss://api-bittensor-mainnet.n.dwellir.com" class="w-full bg-gray-900 border border-gray-700 rounded p-3 text-sm focus:border-blue-500 focus:outline-none shadow-inner">
+                                    <div class="flex gap-3">
+                                        <input type="text" name="query_wss" value="{{ settings.query_wss or '' }}" placeholder="wss://api-bittensor-mainnet.n.dwellir.com" class="flex-1 bg-gray-900 border border-gray-700 rounded p-3 text-sm focus:border-blue-500 focus:outline-none shadow-inner">
+                                        <button type="button" onclick="testWssEndpoint('query')" class="shrink-0 bg-gray-700 hover:bg-gray-600 px-4 py-3 rounded text-sm font-bold">测试</button>
+                                    </div>
                                     <p class="text-xs text-gray-500 mt-2">点击 Telegram 卡片按钮时，将使用此独立连接查询仓位，避免拖慢或影响后台主扫描器。</p>
+                                    <p id="query-test-result" class="text-xs mt-2 text-gray-400"></p>
                                 </div>
                             </div>
                         </div>
