@@ -712,60 +712,199 @@ def _query_blockchain_data(dwellir_wss, address, netuid):
             raise e
             
     try:
-        with QUERY_IO_LOCK:
-            # A. 查询可用 TAO 余额
-            account_info = substrate.query(
-                module="System",
-                storage_function="Account",
-                params=[address]
-            )
-            free_tao = 0.0
-            if account_info:
-                val_dict = account_info.value if hasattr(account_info, "value") else account_info
-                if isinstance(val_dict, dict):
-                    free_tao = float(val_dict.get("data", {}).get("free", 0)) / 1e9
-                
-            # B. 聚合当前冷钱包在此子网上的 Alpha 质押余额
-            alpha_stake = 0.0
+        from substrateinterface.storage import StorageKey
+        from scalecodec.base import ScaleBytes
+        
+        # 确保初始化运行时对象以获取最新的 metadata 和 运行时配置
+        substrate.init_runtime()
+        
+        def get_storage_value_type(pallet, function):
             try:
-                hotkeys_obj = substrate.query("SubtensorModule", "StakingHotkeys", [address])
-                hotkeys = hotkeys_obj.value if hasattr(hotkeys_obj, 'value') else hotkeys_obj
+                metadata_pallet = substrate.metadata.get_metadata_pallet(pallet)
+                if metadata_pallet:
+                    storage_item = metadata_pallet.get_storage_function(function)
+                    if storage_item:
+                        return storage_item.get_value_type_string()
+            except Exception:
+                pass
+            return None
+
+        with QUERY_IO_LOCK:
+            # A. 查询可用 TAO 余额 (System.Account)
+            account_type = get_storage_value_type("System", "Account")
+            account_key = StorageKey.create_from_storage_function(
+                "System", "Account", [address],
+                runtime_config=substrate.runtime_config,
+                metadata=substrate.metadata
+            ).to_hex()
+            
+            res_account = substrate.rpc_request("state_getStorage", [account_key])
+            free_tao = 0.0
+            if res_account and res_account.get("result") and account_type:
+                try:
+                    scale_bytes = ScaleBytes(res_account["result"])
+                    obj = substrate.runtime_config.create_scale_object(
+                        type_string=account_type,
+                        data=scale_bytes,
+                        metadata=substrate.metadata
+                    )
+                    obj.decode()
+                    val_dict = obj.value
+                    if isinstance(val_dict, dict):
+                        free_tao = float(val_dict.get("data", {}).get("free", 0)) / 1e9
+                except Exception as dec_err:
+                    db.add_log("ERROR", f"解码 System.Account 余额失败: {str(dec_err)}")
+            
+            # B. 查询 StakingHotkeys
+            hotkeys_type = get_storage_value_type("SubtensorModule", "StakingHotkeys")
+            hotkeys_key = StorageKey.create_from_storage_function(
+                "SubtensorModule", "StakingHotkeys", [address],
+                runtime_config=substrate.runtime_config,
+                metadata=substrate.metadata
+            ).to_hex()
+            
+            res_hotkeys = substrate.rpc_request("state_getStorage", [hotkeys_key])
+            hotkeys = []
+            if res_hotkeys and res_hotkeys.get("result") and hotkeys_type:
+                try:
+                    scale_bytes = ScaleBytes(res_hotkeys["result"])
+                    obj = substrate.runtime_config.create_scale_object(
+                        type_string=hotkeys_type,
+                        data=scale_bytes,
+                        metadata=substrate.metadata
+                    )
+                    obj.decode()
+                    hotkeys = obj.value
+                except Exception as dec_err:
+                    db.add_log("ERROR", f"解码 StakingHotkeys 列表失败: {str(dec_err)}")
+
+            # C. 聚合当前冷钱包在此子网上的 Alpha 质押余额
+            alpha_stake = 0.0
+            if isinstance(hotkeys, list) and len(hotkeys) > 0:
+                storage_keys = []
+                key_mapping = {}
                 
-                if isinstance(hotkeys, list) and len(hotkeys) > 0:
-                    for hk in hotkeys:
-                        hk_str = hk[0] if isinstance(hk, (list, tuple)) else hk
-                        val = 0.0
-                        for storage_name in ("Alpha", "AlphaV2"):
-                            try:
-                                alpha_obj = substrate.query("SubtensorModule", storage_name, [hk_str, address, int(netuid)])
-                                if alpha_obj is not None:
-                                    val = extract_numeric_value(alpha_obj)
-                                    break
-                            except Exception:
-                                continue
-                                
-                        if val == 0.0:
-                            try:
-                                stake_obj = substrate.query("SubtensorModule", "Stake", [hk_str, address])
-                                if stake_obj is not None:
-                                    val = extract_numeric_value(stake_obj)
-                            except Exception:
-                                pass
-                                
-                        alpha_stake += val / 1e9
-            except Exception as e:
-                db.add_log("ERROR", f"按 Key 点对点查询 Alpha 余额时出错: {str(e)}")
+                # 获取存储定义对应的解析类型
+                alpha_type = get_storage_value_type("SubtensorModule", "Alpha")
+                alpha_v2_type = get_storage_value_type("SubtensorModule", "AlphaV2")
+                stake_type = get_storage_value_type("SubtensorModule", "Stake")
                 
-            # C. 查询子网池以估算 Alpha 价值的 TAO 数量
+                for hk in hotkeys:
+                    hk_str = hk[0] if isinstance(hk, (list, tuple)) else hk
+                    if not isinstance(hk_str, str):
+                        continue
+                    
+                    if alpha_type:
+                        try:
+                            k_alpha = StorageKey.create_from_storage_function(
+                                "SubtensorModule", "Alpha", [hk_str, address, int(netuid)],
+                                runtime_config=substrate.runtime_config,
+                                metadata=substrate.metadata
+                            ).to_hex()
+                            storage_keys.append(k_alpha)
+                            key_mapping[k_alpha] = (hk_str, alpha_type)
+                        except Exception:
+                            pass
+                            
+                    if alpha_v2_type:
+                        try:
+                            k_alphav2 = StorageKey.create_from_storage_function(
+                                "SubtensorModule", "AlphaV2", [hk_str, address, int(netuid)],
+                                runtime_config=substrate.runtime_config,
+                                metadata=substrate.metadata
+                            ).to_hex()
+                            storage_keys.append(k_alphav2)
+                            key_mapping[k_alphav2] = (hk_str, alpha_v2_type)
+                        except Exception:
+                            pass
+                            
+                    if stake_type:
+                        try:
+                            k_stake = StorageKey.create_from_storage_function(
+                                "SubtensorModule", "Stake", [hk_str, address],
+                                runtime_config=substrate.runtime_config,
+                                metadata=substrate.metadata
+                            ).to_hex()
+                            storage_keys.append(k_stake)
+                            key_mapping[k_stake] = (hk_str, stake_type)
+                        except Exception:
+                            pass
+                
+                # 批量分块执行查询 (每 20 个 key 一组)
+                chunk_size = 20
+                chunks = [storage_keys[i:i + chunk_size] for i in range(0, len(storage_keys), chunk_size)]
+                
+                for chunk in chunks:
+                    try:
+                        response = substrate.rpc_request("state_queryStorageAt", [chunk])
+                        if isinstance(response, list) and len(response) > 0:
+                            changes = response[0].get("changes", [])
+                            for k_hex, v_hex in changes:
+                                if v_hex and v_hex != "0x":
+                                    hk_str, t_str = key_mapping.get(k_hex, (None, None))
+                                    if hk_str and t_str:
+                                        val = 0.0
+                                        try:
+                                            scale_bytes = ScaleBytes(v_hex)
+                                            obj = substrate.runtime_config.create_scale_object(
+                                                type_string=t_str,
+                                                data=scale_bytes,
+                                                metadata=substrate.metadata
+                                            )
+                                            obj.decode()
+                                            val = float(obj.value)
+                                        except Exception:
+                                            pass
+                                        alpha_stake += val / 1e9
+                    except Exception as chunk_err:
+                        db.add_log("ERROR", f"批量查询子网 Alpha 余额分块出错: {str(chunk_err)}")
+
+            # D. 查询子网池以估算 Alpha 价值的 TAO 数量 (SubnetTAO, SubnetAlphaIn)
             equivalent_tao = None
             price = None
             try:
-                tao_pool_obj = substrate.query("SubtensorModule", "SubnetTAO", [int(netuid)])
-                alpha_pool_obj = substrate.query("SubtensorModule", "SubnetAlphaIn", [int(netuid)])
+                tao_pool_type = get_storage_value_type("SubtensorModule", "SubnetTAO")
+                alpha_pool_type = get_storage_value_type("SubtensorModule", "SubnetAlphaIn")
                 
-                tao_pool = extract_numeric_value(tao_pool_obj)
-                alpha_pool = extract_numeric_value(alpha_pool_obj)
+                key_tao_pool = StorageKey.create_from_storage_function(
+                    "SubtensorModule", "SubnetTAO", [int(netuid)],
+                    runtime_config=substrate.runtime_config,
+                    metadata=substrate.metadata
+                ).to_hex()
                 
+                key_alpha_pool = StorageKey.create_from_storage_function(
+                    "SubtensorModule", "SubnetAlphaIn", [int(netuid)],
+                    runtime_config=substrate.runtime_config,
+                    metadata=substrate.metadata
+                ).to_hex()
+                
+                response = substrate.rpc_request("state_queryStorageAt", [[key_tao_pool, key_alpha_pool]])
+                
+                tao_pool = 0.0
+                alpha_pool = 0.0
+                if isinstance(response, list) and len(response) > 0:
+                    changes = response[0].get("changes", [])
+                    for k_hex, v_hex in changes:
+                        if v_hex and v_hex != "0x":
+                            if k_hex == key_tao_pool and tao_pool_type:
+                                scale_bytes = ScaleBytes(v_hex)
+                                obj = substrate.runtime_config.create_scale_object(
+                                    type_string=tao_pool_type,
+                                    data=scale_bytes,
+                                    metadata=substrate.metadata
+                                )
+                                obj.decode()
+                                tao_pool = float(obj.value)
+                            elif k_hex == key_alpha_pool and alpha_pool_type:
+                                scale_bytes = ScaleBytes(v_hex)
+                                obj = substrate.runtime_config.create_scale_object(
+                                    type_string=alpha_pool_type,
+                                    data=scale_bytes,
+                                    metadata=substrate.metadata
+                                )
+                                obj.decode()
+                                alpha_pool = float(obj.value)
+                                
                 if alpha_pool > 0:
                     price = tao_pool / alpha_pool
                     equivalent_tao = alpha_stake * price
