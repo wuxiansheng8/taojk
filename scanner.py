@@ -957,7 +957,8 @@ def build_alert_message(
         if received_tao is not None:
             msg += f"{icon} Swap {received_tao:.4f} 𝞃\n"
         else:
-            msg += f"{icon} Swap {amount:.4f} {unit}\n"
+            display_unit = "𝞃" if unit == "TAO" else unit
+            msg += f"{icon} Swap {amount:.4f} {display_unit}\n"
 
         msg += "\n"
 
@@ -979,7 +980,8 @@ def build_alert_message(
     if received_tao is not None:
         msg += f"{icon} Swap {received_tao:.4f} 𝞃\n\n"
     else:
-        msg += f"{icon} Swap {amount:.4f} {unit}\n\n"
+        display_unit = "𝞃" if unit == "TAO" else unit
+        msg += f"{icon} Swap {amount:.4f} {display_unit}\n\n"
 
     if swap_detail:
         msg += swap_detail
