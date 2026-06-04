@@ -960,7 +960,9 @@ def build_alert_message(
             msg += f"{icon} Swap {amount:.4f} {unit}\n"
 
         if alias_address:
-            msg += f" 备注：{safe_text(alias_address)}\n"
+            msg += f" 备注：{safe_text(alias_address)}\n\n"
+        else:
+            msg += "\n"
 
         msg += f"👤 钱包地址: <code>{safe_text(short_address(address))}</code>\n"
         if swap_detail:
@@ -968,7 +970,7 @@ def build_alert_message(
         elif detail:
             msg += f"🔥 热钱包: <code>{safe_text(short_address(detail))}</code>\n"
             
-        msg += f"📍 子网{safe_text(format_netuid(netuid))} "
+        msg += f"\n📍 子网{safe_text(format_netuid(netuid))} "
         if tx_ref:
             msg += f"🔎 区块: <code>{safe_text(tx_ref)}</code>\n"
         return msg
