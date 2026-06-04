@@ -7,6 +7,114 @@ from urllib.parse import urlparse, urlunparse
 import requests
 from substrateinterface import SubstrateInterface
 import database as db
+import concurrent.futures
+from datetime import datetime, timezone
+import position_query
+
+SCANNER_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=5)
+QUERY_LOCKS = {}
+QUERY_LOCKS_LOCK = threading.Lock()
+
+def get_query_lock(address, netuid):
+    key = (address, netuid)
+    with QUERY_LOCKS_LOCK:
+        if key not in QUERY_LOCKS:
+            QUERY_LOCKS[key] = threading.Lock()
+        return QUERY_LOCKS[key]
+
+def edit_message_text(bot_token, chat_id, message_id, original_text, append_text, reply_markup=None):
+    markers = [
+        "\n\n💰 <b>当前钱包仓位</b>",
+        "\n\n💰 <b>剩余可用:</b>",
+        "\n\n💰 剩余可用:",
+        "\n\n❌ 当前仓位查询超时",
+        "\n\n❌ 查询超时",
+        "\n\n❌ 节点"
+    ]
+    for marker in markers:
+        if marker in original_text:
+            original_text = original_text.split(marker)[0]
+        
+    new_text = original_text + append_text
+    url = f"https://api.telegram.org/bot{bot_token}/editMessageText"
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": new_text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+        
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        db.add_log("ERROR", f"编辑 TG 消息失败: {str(e)}")
+
+def edit_message_reply_markup(bot_token, chat_id, message_id, reply_markup):
+    url = f"https://api.telegram.org/bot{bot_token}/editMessageReplyMarkup"
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "reply_markup": reply_markup
+    }
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        db.add_log("WARN", f"更新按钮状态失败: {str(e)}")
+
+def background_query_and_update(audit_id, address, netuid, original_msg, bot_token, chat_id, reply_markup):
+    lock = get_query_lock(address, netuid)
+    with lock:
+        cached = db.get_wallet_cache(address, netuid)
+        if cached:
+            try:
+                dt = datetime.strptime(cached["updated_at"], "%Y-%m-%d %H:%M:%S")
+                if (datetime.now(timezone.utc).replace(tzinfo=None) - dt).total_seconds() < 3.0:
+                    balance_info = position_query.format_balance_info(
+                        netuid, cached["free_tao"], cached["alpha_stake"], cached["equivalent_tao"], cached["price"]
+                    )
+                    _edit_tg_msg_now(audit_id, original_msg, balance_info, bot_token, chat_id, reply_markup)
+                    return
+            except Exception:
+                pass
+
+        dwellir_wss = db.get_setting("query_wss", "").strip()
+        if not dwellir_wss:
+            dwellir_wss = db.get_setting("dwellir_wss", "wss://api-bittensor-mainnet.n.dwellir.com").strip()
+        if not dwellir_wss:
+            dwellir_wss = "wss://api-bittensor-mainnet.n.dwellir.com"
+            
+        try:
+            free_tao, alpha_stake, equivalent_tao, price = position_query._query_blockchain_data(dwellir_wss, address, netuid)
+            db.update_wallet_cache(address, netuid, free_tao, alpha_stake, equivalent_tao, price)
+            balance_info = position_query.format_balance_info(netuid, free_tao, alpha_stake, equivalent_tao, price)
+        except Exception as e:
+            db.add_log("ERROR", f"后台余额查询失败: {str(e)}")
+            return
+
+        _edit_tg_msg_now(audit_id, original_msg, balance_info, bot_token, chat_id, reply_markup)
+
+def _edit_tg_msg_now(audit_id, original_msg, balance_info, bot_token, chat_id, reply_markup):
+    message_id = None
+    for _ in range(50):
+        conn = db.get_db()
+        row = conn.execute("SELECT message_id, send_status FROM notification_audit_logs WHERE id = ?", (audit_id,)).fetchone()
+        conn.close()
+        if row and row["message_id"]:
+            message_id = row["message_id"]
+            break
+        if row and row["send_status"] == "failed":
+            return
+        time.sleep(0.2)
+        
+    if not message_id:
+        db.add_log("WARN", f"后台更新消息失败: 未能在限时内获取到 audit_id={audit_id} 的 message_id")
+        return
+        
+    edit_message_text(bot_token, chat_id, message_id, original_msg, balance_info, reply_markup)
+
 
 RAO_DECIMALS = 1e9
 
@@ -789,10 +897,16 @@ def send_telegram_msg_to_group_now(group_id, msg, audit_id=None, reply_markup=No
         db.add_log("ERROR", f"TG 发送失败，{bot_info}: {error}")
         return False, error
 
+    msg_id = None
+    try:
+        msg_id = res.json().get("result", {}).get("message_id")
+    except Exception:
+        pass
+
     LAST_TG_ERROR = ""
     LAST_TG_SUCCESS_TIME = time.time()
     if audit_id:
-        db.update_notification_audit_log(audit_id, "sent", "")
+        db.update_notification_audit_log(audit_id, "sent", "", message_id=msg_id)
     return True, ""
 
 def _process_tg_queue_item(item):
@@ -944,10 +1058,10 @@ def build_alert_message(
         if alpha_val is not None and tao_val is not None and alpha_val > 0:
             price = tao_val / alpha_val
             if action == TEXT["move_stake"]:
-                origin_netuid = netuid
+                target_netuid = netuid
                 if netuid and "->" in str(netuid):
-                    origin_netuid = str(netuid).split("->")[0]
-                swap_detail = f"<code>{alpha_val:.2f}α ⇄ {tao_val:.3f}𝞃</code>\n折算(SN{safe_text(format_netuid(origin_netuid))})≈ <code>{price:.6f}𝞃</code>\n"
+                    target_netuid = str(netuid).split("->")[-1]
+                swap_detail = f"<code>{alpha_val:.2f}α ⇄ {tao_val:.3f}𝞃</code>\n折算(SN{safe_text(format_netuid(target_netuid))})≈ <code>{price:.6f}𝞃</code>\n"
             else:
                 swap_detail = f"<code>{alpha_val:.2f}α ⇄ {tao_val:.3f}𝞃</code>\nalpha(SN{safe_text(format_netuid(netuid))})≈ <code>{price:.6f}𝞃</code>\n"
 
@@ -995,7 +1109,9 @@ def check_and_alert(
     alpha_amount=None,
 ):
     groups = db.get_groups()
+    matched_groups = []
 
+    # 1. 匹配订阅分组，计算匹配状态
     for group in groups:
         if not group.get("is_active"):
             continue
@@ -1011,9 +1127,7 @@ def check_and_alert(
                 is_monitored = True
                 break
 
-        amount_for_threshold = None if unit == "Alpha" and threshold_amount is None else amount
-        if threshold_amount is not None:
-            amount_for_threshold = threshold_amount
+        amount_for_threshold = threshold_amount or amount
         threshold_matched = amount_for_threshold is not None and amount_for_threshold >= float(group.get("threshold_tao") or 5.0)
 
         if group["type"] == "wallet":
@@ -1026,6 +1140,39 @@ def check_and_alert(
             title = f"🐋 巨鲸异动 ({group['name']})"
         else:
             continue
+
+        matched_groups.append({
+            "group": group,
+            "title": title,
+            "alias": alias,
+            "active_wallets": active_wallets
+        })
+
+    # 2. 换仓或加减仓时，确定查询/缓存子网号 (110->15 换仓取目的子网 15)
+    lookup_netuid = int(str(netuid).split("->")[-1]) if netuid and "->" in str(netuid) else (int(netuid) if netuid is not None else None)
+    
+    # 3. 无论金额大小，只要已有本地缓存记录，执行 Delta 滑移更新缓存
+    has_cache = False
+    if address and lookup_netuid is not None:
+        has_cache = (db.get_wallet_cache(address, lookup_netuid) is not None)
+        
+    if has_cache:
+        db.update_wallet_cache_delta(address, lookup_netuid, action, amount, alpha_amount=alpha_amount, received_tao=received_tao)
+
+    # 4. 如果未匹配到任何需要播报的分组，静默退出
+    if not matched_groups:
+        return
+
+    # 5. 命中推送，读取更新后的缓存
+    cached_info = None
+    if has_cache:
+        cached_info = db.get_wallet_cache(address, lookup_netuid)
+
+    for item in matched_groups:
+        group = item["group"]
+        title = item["title"]
+        alias = item["alias"]
+        active_wallets = item["active_wallets"]
 
         alias_address = active_wallets.get(address) if address else None
         alias_from = active_wallets.get(from_address) if from_address else None
@@ -1050,20 +1197,38 @@ def check_and_alert(
             group_type=group.get("type"),
             alpha_amount=alpha_amount,
         )
+
+        # 有缓存：直接拼装 Delta 增量值秒发
+        if cached_info:
+            free_tao = cached_info["free_tao"] or 0.0
+            alpha_stake = cached_info["alpha_stake"] or 0.0
+            equivalent_tao = cached_info["equivalent_tao"] or 0.0
+            
+            balance_info = (
+                f"\n\n💰 <b>当前钱包仓位</b>\n"
+                f"剩余可用: <code>{free_tao:.4f} T</code>\n"
+            )
+            if equivalent_tao > 0:
+                balance_info += f"SN{lookup_netuid} 总 Alpha: <code>{alpha_stake:.4f}</code> ≈ <code>{equivalent_tao:.4f} T</code>"
+            else:
+                balance_info += f"SN{lookup_netuid} 总 Alpha: <code>{alpha_stake:.4f}</code>"
+                
+            msg += balance_info
+
+        # 构造 Inline 按钮
         reply_markup = None
         if action != TEXT["transfer"]:
             reply_markup = build_inline_keyboard(tx_ref=tx_ref, netuid=netuid, address=address)
+            
         send_with_backup = (
             group.get("split_stake_bots")
             and action == TEXT["remove_stake"]
             and group.get("tg_token_backup")
             and group.get("tg_chat_id_backup")
         )
-        bot_token = group.get("tg_token")
-        chat_id = group.get("tg_chat_id")
-        if send_with_backup:
-            bot_token = group.get("tg_token_backup")
-            chat_id = group.get("tg_chat_id_backup")
+        bot_token = group.get("tg_token_backup") if send_with_backup else group.get("tg_token")
+        chat_id = group.get("tg_chat_id_backup") if send_with_backup else group.get("tg_chat_id")
+        
         audit_id = db.add_notification_audit_log({
             "group_id": group["id"],
             "group_name": group["name"],
@@ -1085,6 +1250,8 @@ def check_and_alert(
             "send_status": "queued",
             "error_message": "",
         })
+        
+        # 秒级秒发 (不阻塞主扫描线程)
         send_telegram_msg_to_group(
             group["id"],
             msg,
@@ -1093,6 +1260,13 @@ def check_and_alert(
             bot_token=bot_token,
             chat_id=chat_id,
         )
+        
+        # 将链上查询任务提交到扫描器固定线程池异步校对
+        if lookup_netuid is not None:
+            SCANNER_EXECUTOR.submit(
+                background_query_and_update,
+                audit_id, address, lookup_netuid, msg, bot_token, chat_id, reply_markup
+            )
 
 def alert_from_stake_events(events, tx_ref=None, tx_hash=None):
     for record in events:

@@ -163,6 +163,30 @@ def init_db():
             last_attempt INTEGER NOT NULL
         )
     ''')
+    # 9. 监控/巨鲸钱包的持仓本地缓存表 (冷键+子网号作为复合主键)
+    try:
+        table_info = conn.execute("PRAGMA table_info(wallets_cache)").fetchall()
+        if table_info:
+            pk_cols = [row["name"] for row in table_info if row["pk"] > 0]
+            if pk_cols and set(pk_cols) != {"address", "netuid"}:
+                c.execute("DROP TABLE wallets_cache")
+    except Exception:
+        pass
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS wallets_cache (
+            address TEXT,
+            netuid INTEGER,
+            free_tao REAL,
+            alpha_stake REAL,
+            equivalent_tao REAL,
+            price REAL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            dirty INTEGER DEFAULT 0,
+            PRIMARY KEY (address, netuid)
+        )
+    ''')
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('cache_threshold_tao', '60.0')")
 
     # --- 性能优化：创建常用索引 ---
     c.execute("CREATE INDEX IF NOT EXISTS idx_wallets_group_addr ON wallets(group_id, address)")
@@ -170,6 +194,11 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_system_logs_created ON system_logs(created_at)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON notification_audit_logs(created_at)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_status_created ON notification_audit_logs(send_status, created_at)")
+
+    # 动态检查 notification_audit_logs 表是否缺少 message_id 列，没有则新增
+    existing_audit_cols = {row["name"] for row in conn.execute("PRAGMA table_info(notification_audit_logs)").fetchall()}
+    if "message_id" not in existing_audit_cols:
+        conn.execute("ALTER TABLE notification_audit_logs ADD COLUMN message_id INTEGER")
 
     # 默认创建一个巨鲸监控组和钱包监控组
     c.execute("SELECT count(*) FROM monitor_groups")
@@ -363,12 +392,18 @@ def add_notification_audit_log(entry):
 
     return _run_write(operation)
 
-def update_notification_audit_log(audit_id, send_status, error_message=""):
+def update_notification_audit_log(audit_id, send_status, error_message="", message_id=None):
     def operation(conn):
-        conn.execute(
-            "UPDATE notification_audit_logs SET send_status = ?, error_message = ? WHERE id = ?",
-            (send_status, error_message, audit_id)
-        )
+        if message_id is not None:
+            conn.execute(
+                "UPDATE notification_audit_logs SET send_status = ?, error_message = ?, message_id = ? WHERE id = ?",
+                (send_status, error_message, message_id, audit_id)
+            )
+        else:
+            conn.execute(
+                "UPDATE notification_audit_logs SET send_status = ?, error_message = ? WHERE id = ?",
+                (send_status, error_message, audit_id)
+            )
 
     _run_write(operation)
 
@@ -405,7 +440,91 @@ def get_notification_success_rate(hours=24):
     sent_total = row["sent_total"] if row and row["sent_total"] is not None else 0
     rate = round((sent_total / total) * 100, 2) if total else 0
     return {
+        "rate": rate,
         "total": total,
         "sent_total": sent_total,
-        "rate": rate,
+    }
+
+def get_wallet_cache(address, netuid):
+    conn = get_db()
+    row = conn.execute(
+        "SELECT free_tao, alpha_stake, equivalent_tao, price, updated_at FROM wallets_cache WHERE address = ? AND netuid = ?",
+        (address, int(netuid))
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def update_wallet_cache(address, netuid, free_tao, alpha_stake, equivalent_tao, price):
+    def operation(conn):
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO wallets_cache (address, netuid, free_tao, alpha_stake, equivalent_tao, price, updated_at, dirty)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 0)
+            """,
+            (address, int(netuid), free_tao, alpha_stake, equivalent_tao, price)
+        )
+        conn.execute("UPDATE wallets_cache SET free_tao = ? WHERE address = ?", (free_tao, address))
+    _run_write(operation)
+
+def update_wallet_cache_delta(address, netuid, action, amount, alpha_amount=None, received_tao=None):
+    def operation(conn):
+        row = conn.execute(
+            "SELECT free_tao, alpha_stake, equivalent_tao, price FROM wallets_cache WHERE address = ? AND netuid = ?",
+            (address, int(netuid))
+        ).fetchone()
+        if not row:
+            return
+        
+        free_tao = row["free_tao"] or 0.0
+        alpha_stake = row["alpha_stake"] or 0.0
+        price = row["price"] or 0.0
+        
+        if action == "加仓":
+            free_tao = max(0.0, free_tao - amount)
+            if alpha_amount is not None:
+                alpha_stake += alpha_amount
+            elif price > 0:
+                alpha_stake += (amount / price)
+        elif action == "减仓":
+            if received_tao is not None:
+                free_tao += received_tao
+            if alpha_amount is not None:
+                alpha_stake = max(0.0, alpha_stake - alpha_amount)
+            elif amount is not None:
+                alpha_stake = max(0.0, alpha_stake - amount)
+                
+        equivalent_tao = alpha_stake * price
+        
+        conn.execute(
+            """
+            UPDATE wallets_cache
+            SET free_tao = ?, alpha_stake = ?, equivalent_tao = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE address = ? AND netuid = ?
+            """,
+            (free_tao, alpha_stake, equivalent_tao, address, int(netuid))
+        )
+        conn.execute("UPDATE wallets_cache SET free_tao = ? WHERE address = ?", (free_tao, address))
+    _run_write(operation)
+
+def get_cache_stats():
+    conn = get_db()
+    wallet_count = conn.execute("SELECT COUNT(DISTINCT address) FROM wallets_cache").fetchone()[0]
+    record_count = conn.execute("SELECT COUNT(*) FROM wallets_cache").fetchone()[0]
+    conn.close()
+    
+    db_size_bytes = 0
+    if os.path.exists(DB_PATH):
+        db_size_bytes = os.path.getsize(DB_PATH)
+        
+    if db_size_bytes < 1024:
+        db_size_str = f"{db_size_bytes} B"
+    elif db_size_bytes < 1024 * 1024:
+        db_size_str = f"{db_size_bytes / 1024:.2f} KB"
+    else:
+        db_size_str = f"{db_size_bytes / (1024 * 1024):.2f} MB"
+        
+    return {
+        "wallet_count": wallet_count or 0,
+        "record_count": record_count or 0,
+        "db_size": db_size_str
     }

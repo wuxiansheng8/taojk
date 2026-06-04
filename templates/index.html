@@ -911,6 +911,25 @@
                                     <p class="text-xs text-gray-500 mt-2">点击 Telegram 卡片按钮时，将使用此独立连接查询仓位，避免拖慢或影响后台主扫描器。</p>
                                     <p id="query-test-result" class="text-xs mt-2 text-gray-400"></p>
                                 </div>
+                                <div class="border border-gray-700 rounded-lg p-4 bg-gray-900/40 mt-4">
+                                    <div class="text-sm font-bold text-teal-400 mb-3 flex items-center gap-2">
+                                        <i class="fas fa-database"></i> 本地钱包持仓缓存状态
+                                    </div>
+                                    <div class="grid grid-cols-3 gap-3 text-center">
+                                        <div class="bg-gray-800 p-3 rounded border border-gray-700">
+                                            <div class="text-xs text-gray-400">已存钱包数</div>
+                                            <div class="text-lg font-bold text-white mt-1">{{ cache_stats.wallet_count }}</div>
+                                        </div>
+                                        <div class="bg-gray-800 p-3 rounded border border-gray-700">
+                                            <div class="text-xs text-gray-400">仓位记录数</div>
+                                            <div class="text-lg font-bold text-white mt-1">{{ cache_stats.record_count }}</div>
+                                        </div>
+                                        <div class="bg-gray-800 p-3 rounded border border-gray-700">
+                                            <div class="text-xs text-gray-400">数据库大小</div>
+                                            <div class="text-lg font-bold text-white mt-1">{{ cache_stats.db_size }}</div>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                         <div class="pt-4">
