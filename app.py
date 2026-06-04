@@ -663,6 +663,18 @@ def edit_message_text(bot_token, chat_id, message_id, original_text, append_text
     except Exception as e:
         db.add_log("ERROR", f"编辑 TG 消息失败: {str(e)}")
 
+def edit_message_reply_markup(bot_token, chat_id, message_id, reply_markup):
+    url = f"https://api.telegram.org/bot{bot_token}/editMessageReplyMarkup"
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "reply_markup": reply_markup
+    }
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        db.add_log("WARN", f"更新按钮状态失败: {str(e)}")
+
 def get_query_substrate(dwellir_wss):
     global QUERY_SUBSTRATE
     if QUERY_SUBSTRATE is None:
@@ -1055,7 +1067,20 @@ def handle_tg_callback(bot_token, callback_query):
     except Exception:
         pass
 
-    # 4. 执行链上查询
+    # 4. 深度克隆原始与加载中的 reply_markup 并把点击的按钮文字改为“⏳ 查询中...”
+    import copy
+    original_reply_markup = copy.deepcopy(message.get("reply_markup", {}))
+    loading_reply_markup = copy.deepcopy(original_reply_markup)
+    if "inline_keyboard" in loading_reply_markup:
+        for row in loading_reply_markup["inline_keyboard"]:
+            for btn in row:
+                if btn.get("callback_data") == callback_data:
+                    btn["text"] = "⏳ 查询中..."
+    
+    # 立即更新按钮为“查询中”状态
+    edit_message_reply_markup(bot_token, chat_id, message_id, loading_reply_markup)
+
+    # 5. 执行链上查询
     dwellir_wss = db.get_setting("query_wss", "").strip()
     if not dwellir_wss:
         dwellir_wss = db.get_setting("dwellir_wss", "wss://api-bittensor-mainnet.n.dwellir.com").strip()
@@ -1064,6 +1089,7 @@ def handle_tg_callback(bot_token, callback_query):
         
     original_text = get_original_text(address, netuid, message)
     start_time = time.perf_counter()
+    is_edited = False
     try:
         # 复用全局线程池 QUERY_EXECUTOR 提交，防止重复创建线程池开销
         future = QUERY_EXECUTOR.submit(_query_blockchain_data, dwellir_wss, address, netuid)
@@ -1077,15 +1103,21 @@ def handle_tg_callback(bot_token, callback_query):
         db.add_log("INFO", f"仓位查询完成: 用时 {duration_ms}ms, 目标: {address}, 子网: {netuid}")
         
         balance_info = format_balance_info(netuid, free_tao, alpha_stake, equivalent_tao, price)
-        edit_message_text(bot_token, chat_id, message_id, original_text, balance_info, message.get("reply_markup"))
+        edit_message_text(bot_token, chat_id, message_id, original_text, balance_info, original_reply_markup)
+        is_edited = True
         
     except concurrent.futures.TimeoutError:
         db.add_log("ERROR", "执行 Webhook 链上余额查询超时 (15秒)")
-        edit_message_text(bot_token, chat_id, message_id, original_text, "\n\n❌ 当前仓位查询超时，请稍后再试", message.get("reply_markup"))
+        edit_message_text(bot_token, chat_id, message_id, original_text, "\n\n❌ 当前仓位查询超时，请稍后再试", original_reply_markup)
+        is_edited = True
     except Exception as e:
         db.add_log("ERROR", f"执行 Webhook 链上余额查询时发生异常: {str(e)}")
-        edit_message_text(bot_token, chat_id, message_id, original_text, "\n\n❌ 当前仓位查询超时，请稍后再试", message.get("reply_markup"))
+        edit_message_text(bot_token, chat_id, message_id, original_text, "\n\n❌ 当前仓位查询超时，请稍后再试", original_reply_markup)
+        is_edited = True
     finally:
+        # 如果因意外情况或网络报错导致上面的消息编辑复原逻辑未执行，在 finally 里强制进行兜底恢复
+        if not is_edited:
+            edit_message_reply_markup(bot_token, chat_id, message_id, original_reply_markup)
         with IN_PROGRESS_LOCK:
             IN_PROGRESS_QUERIES.discard(cache_key)
 
