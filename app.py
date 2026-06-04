@@ -978,12 +978,11 @@ def format_balance_info(netuid, free_tao, alpha_stake, equivalent_tao, price):
     balance_info = (
         f"\n\n💰 <b>当前操作者仓位</b>\n"
         f"剩余可用: <code>{free_tao:.4f} T</code>\n"
-        f"SN{netuid} 总 Alpha: <code>{alpha_stake:.4f}</code>"
     )
-    if price is not None:
-        balance_info += f"\n当前 Alpha 价格: <code>1 Alpha ≈ {price:.4f} T</code>"
     if equivalent_tao is not None:
-        balance_info += f"\n折合: <code>≈ {equivalent_tao:.4f} T</code>"
+        balance_info += f"SN{netuid} 总 Alpha: <code>{alpha_stake:.4f}</code> ≈ <code>{equivalent_tao:.4f} T</code>"
+    else:
+        balance_info += f"SN{netuid} 总 Alpha: <code>{alpha_stake:.4f}</code>"
     return balance_info
 
 def handle_tg_callback(bot_token, callback_query):
