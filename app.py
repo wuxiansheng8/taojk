@@ -578,12 +578,17 @@ def import_wallets(request: Request, file: UploadFile = File(...), csrf_token: s
 # --- Telegram Webhook Helper Functions ---
 
 def extract_numeric_value(obj):
-    """提取 Substrate 节点返回数据中各种嵌套类型的数值 (兼容 dict/U64/ScaleObj 等)"""
+    """提取 Substrate 节点返回数据中各种嵌套类型的数值 (兼容 dict/SafeFloat/U64/ScaleObj 等)"""
     if obj is None:
         return 0.0
     if isinstance(obj, (int, float)):
         return float(obj)
     if isinstance(obj, dict):
+        if 'mantissa' in obj and 'exponent' in obj:
+            try:
+                return float(obj['mantissa']) * (2.0 ** float(obj['exponent']))
+            except Exception:
+                return 0.0
         if 'bits' in obj:
             return float(obj['bits'])
         if 'value' in obj:
@@ -802,7 +807,7 @@ def _query_blockchain_data(dwellir_wss, address, netuid):
                                 metadata=substrate.metadata
                             ).to_hex()
                             storage_keys.append(k_alpha)
-                            key_mapping[k_alpha] = (hk_str, alpha_type)
+                            key_mapping[k_alpha] = (hk_str, "Alpha", alpha_type)
                         except Exception:
                             pass
                             
@@ -814,7 +819,7 @@ def _query_blockchain_data(dwellir_wss, address, netuid):
                                 metadata=substrate.metadata
                             ).to_hex()
                             storage_keys.append(k_alphav2)
-                            key_mapping[k_alphav2] = (hk_str, alpha_v2_type)
+                            key_mapping[k_alphav2] = (hk_str, "AlphaV2", alpha_v2_type)
                         except Exception:
                             pass
                             
@@ -826,7 +831,7 @@ def _query_blockchain_data(dwellir_wss, address, netuid):
                                 metadata=substrate.metadata
                             ).to_hex()
                             storage_keys.append(k_stake)
-                            key_mapping[k_stake] = (hk_str, stake_type)
+                            key_mapping[k_stake] = (hk_str, "Stake", stake_type)
                         except Exception:
                             pass
                 
@@ -834,6 +839,10 @@ def _query_blockchain_data(dwellir_wss, address, netuid):
                 chunk_size = 20
                 chunks = [storage_keys[i:i + chunk_size] for i in range(0, len(storage_keys), chunk_size)]
                 
+                hotkey_alpha_v2 = {}
+                hotkey_alpha = {}
+                hotkey_stake = {}
+
                 for chunk in chunks:
                     try:
                         response = substrate.rpc_request("state_queryStorageAt", [chunk])
@@ -841,8 +850,8 @@ def _query_blockchain_data(dwellir_wss, address, netuid):
                             changes = response[0].get("changes", [])
                             for k_hex, v_hex in changes:
                                 if v_hex and v_hex != "0x":
-                                    hk_str, t_str = key_mapping.get(k_hex, (None, None))
-                                    if hk_str and t_str:
+                                    hk_str, storage_name, t_str = key_mapping.get(k_hex, (None, None, None))
+                                    if hk_str and storage_name and t_str:
                                         val = 0.0
                                         try:
                                             scale_bytes = ScaleBytes(v_hex)
@@ -852,12 +861,34 @@ def _query_blockchain_data(dwellir_wss, address, netuid):
                                                 metadata=substrate.metadata
                                             )
                                             obj.decode()
-                                            val = float(obj.value)
+                                            val = extract_numeric_value(obj)
                                         except Exception:
                                             pass
-                                        alpha_stake += val / 1e9
+                                        
+                                        if storage_name == "AlphaV2":
+                                            hotkey_alpha_v2[hk_str] = val
+                                        elif storage_name == "Alpha":
+                                            hotkey_alpha[hk_str] = val
+                                        elif storage_name == "Stake":
+                                            hotkey_stake[hk_str] = val
                     except Exception as chunk_err:
                         db.add_log("ERROR", f"批量查询子网 Alpha 余额分块出错: {str(chunk_err)}")
+
+                # 合并计算总质押额，防止重复计算
+                for hk in hotkeys:
+                    hk_str = hk[0] if isinstance(hk, (list, tuple)) else hk
+                    if not isinstance(hk_str, str):
+                        continue
+                    
+                    val_v2 = hotkey_alpha_v2.get(hk_str, 0.0)
+                    val_v1 = hotkey_alpha.get(hk_str, 0.0)
+                    val_stake = hotkey_stake.get(hk_str, 0.0)
+                    
+                    selected = val_v2 if val_v2 > 0 else val_v1
+                    if selected <= 0:
+                        selected = val_stake
+                    
+                    alpha_stake += selected / 1e9
 
             # D. 查询子网池以估算 Alpha 价值的 TAO 数量 (SubnetTAO, SubnetAlphaIn)
             equivalent_tao = None
