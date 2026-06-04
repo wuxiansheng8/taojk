@@ -959,16 +959,19 @@ def build_alert_message(
         else:
             msg += f"{icon} Swap {amount:.4f} {unit}\n"
 
-        if alias_address:
-            msg += f" <b>备注：{safe_text(alias_address)}</b>\n\n"
-        else:
-            msg += "\n"
+        msg += "\n"
 
-        msg += f"👤 钱包地址: <code>{safe_text(short_address(address))}</code>\n"
         if swap_detail:
             msg += swap_detail
         elif detail:
             msg += f"🔥 热钱包: <code>{safe_text(short_address(detail))}</code>\n"
+
+        msg += "\n"
+
+        if alias_address:
+            msg += f"<b>备注：{safe_text(alias_address)}</b>\n"
+
+        msg += f"👤 钱包地址: <code>{safe_text(short_address(address))}</code>\n"
         return msg
 
     # 巨鲸组
@@ -978,11 +981,12 @@ def build_alert_message(
     else:
         msg += f"{icon} Swap {amount:.4f} {unit}\n\n"
 
-    msg += f"👤 钱包地址: <code>{safe_text(short_address(address))}</code>\n"
     if swap_detail:
         msg += swap_detail
     elif detail:
         msg += f"🔥 热钱包: <code>{safe_text(short_address(detail))}</code>\n"
+
+    msg += f"\n👤 钱包地址: <code>{safe_text(short_address(address))}</code>\n"
 
     return msg
 
