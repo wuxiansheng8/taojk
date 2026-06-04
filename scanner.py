@@ -969,10 +969,6 @@ def build_alert_message(
             msg += swap_detail
         elif detail:
             msg += f"🔥 热钱包: <code>{safe_text(short_address(detail))}</code>\n"
-            
-        msg += f"\n📍 子网{safe_text(format_netuid(netuid))} "
-        if tx_ref:
-            msg += f"🔎 区块: <code>{safe_text(tx_ref)}</code>\n"
         return msg
 
     # 巨鲸组
@@ -987,10 +983,6 @@ def build_alert_message(
         msg += swap_detail
     elif detail:
         msg += f"🔥 热钱包: <code>{safe_text(short_address(detail))}</code>\n"
-    msg += f"\n📍 子网{safe_text(format_netuid(netuid))} "
-
-    if tx_ref:
-        msg += f"🔎 区块: <code>{safe_text(tx_ref)}</code>\n"
 
     return msg
 
