@@ -947,9 +947,9 @@ def build_alert_message(
                 origin_netuid = netuid
                 if netuid and "->" in str(netuid):
                     origin_netuid = str(netuid).split("->")[0]
-                swap_detail = f"<code>{alpha_val:.2f}α ⇄ {tao_val:.6f}𝞃</code>\n折算单价(SN{safe_text(format_netuid(origin_netuid))})≈ <code>{price:.6f}𝞃</code>\n"
+                swap_detail = f"<code>{alpha_val:.2f}α ⇄ {tao_val:.6f}𝞃</code>\n折算(SN{safe_text(format_netuid(origin_netuid))})≈ <code>{price:.6f}𝞃</code>\n"
             else:
-                swap_detail = f"<code>{alpha_val:.2f}α ⇄ {tao_val:.6f}𝞃</code>\n单价alpha(SN{safe_text(format_netuid(netuid))})≈ <code>{price:.6f}𝞃</code>\n"
+                swap_detail = f"<code>{alpha_val:.2f}α ⇄ {tao_val:.6f}𝞃</code>\nalpha(SN{safe_text(format_netuid(netuid))})≈ <code>{price:.6f}𝞃</code>\n"
 
     # 钱包监控组
     if group_type == "wallet":
