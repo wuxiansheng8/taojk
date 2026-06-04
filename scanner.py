@@ -192,7 +192,7 @@ def build_inline_keyboard(tx_ref=None, netuid=None, address=None):
     profile_link = profile_url(address)
 
     if profile_link:
-        buttons.append({"text": "💰 查看钱包", "url": profile_link})
+        buttons.append({"text": "💰 查看当前钱包地址", "url": profile_link})
 
     if address and netuid is not None:
         # 如果为挪仓 netuid="110->15"，直接提取目标子网 "15" 作为按钮回调子网号
