@@ -192,7 +192,7 @@ def build_inline_keyboard(tx_ref=None, netuid=None, address=None):
     profile_link = profile_url(address)
 
     if profile_link:
-        buttons.append({"text": "💰 查看操作者钱包", "url": profile_link})
+        buttons.append({"text": "💰 查看钱包", "url": profile_link})
 
     if address and netuid is not None:
         # 如果为挪仓 netuid="110->15"，直接提取目标子网 "15" 作为按钮回调子网号
@@ -962,7 +962,7 @@ def build_alert_message(
         if alias_address:
             msg += f" 备注：{safe_text(alias_address)}\n"
 
-        msg += f"🏠 操作者: <code>{safe_text(short_address(address))}</code>\n"
+        msg += f"👤 钱包地址: <code>{safe_text(short_address(address))}</code>\n"
         if swap_detail:
             msg += swap_detail
         elif detail:
@@ -980,7 +980,7 @@ def build_alert_message(
     else:
         msg += f"{icon} Swap {amount:.4f} {unit}\n\n"
 
-    msg += f"🏠 操作者: <code>{safe_text(short_address(address))}</code>\n"
+    msg += f"👤 钱包地址: <code>{safe_text(short_address(address))}</code>\n"
     if swap_detail:
         msg += swap_detail
     elif detail:

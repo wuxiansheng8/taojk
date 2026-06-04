@@ -635,7 +635,7 @@ def register_all_webhooks():
 def edit_message_text(bot_token, chat_id, message_id, original_text, append_text, reply_markup=None):
     # 定义切割标识符，避免多次重复点击时追加多个旧仓位或报错区块
     markers = [
-        "\n\n💰 <b>当前操作者仓位</b>",
+        "\n\n💰 <b>当前钱包仓位</b>",
         "\n\n💰 <b>剩余可用:</b>",
         "\n\n💰 剩余可用:",
         "\n\n❌ 当前仓位查询超时",
@@ -976,7 +976,7 @@ def get_original_text(address, netuid, message):
 
 def format_balance_info(netuid, free_tao, alpha_stake, equivalent_tao, price):
     balance_info = (
-        f"\n\n💰 <b>当前操作者仓位</b>\n"
+        f"\n\n💰 <b>当前钱包仓位</b>\n"
         f"剩余可用: <code>{free_tao:.4f} T</code>\n"
     )
     if equivalent_tao is not None:
