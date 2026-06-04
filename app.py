@@ -586,7 +586,7 @@ def extract_numeric_value(obj):
     if isinstance(obj, dict):
         if 'mantissa' in obj and 'exponent' in obj:
             try:
-                return float(obj['mantissa']) * (2.0 ** float(obj['exponent']))
+                return float(obj['mantissa']) * (10.0 ** float(obj['exponent']))
             except Exception:
                 return 0.0
         if 'bits' in obj:
