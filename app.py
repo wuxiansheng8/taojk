@@ -322,6 +322,7 @@ def settings_page(request: Request):
         "wss_load_balance": db.get_setting("wss_load_balance", "0"),
         "tg_throttle_ms": db.get_setting("tg_throttle_ms", "500"),
         "public_url": db.get_setting("public_url", ""),
+        "cache_threshold_tao": db.get_setting("cache_threshold_tao", "60.0"),
     }
     cache_stats = db.get_cache_stats()
     uptime_sec = get_uptime_seconds()
@@ -433,6 +434,7 @@ def save_sys_settings(
     wss_load_balance: str = Form("0"), 
     tg_throttle_ms: str = Form(...),
     public_url: str = Form(""),
+    cache_threshold_tao: str = Form("60.0"),
     csrf_token: str = Form(...)
 ):
     check_login(request)
@@ -450,6 +452,7 @@ def save_sys_settings(
     db.set_setting("wss_load_balance", "1" if wss_load_balance == "1" else "0")
     db.set_setting("tg_throttle_ms", tg_throttle_ms)
     db.set_setting("public_url", public_url_clean)
+    db.set_setting("cache_threshold_tao", cache_threshold_tao.strip())
     
     # 重置独立的查询连接，强制下次查询时重新建连
     with position_query.QUERY_SUBSTRATE_LOCK:

@@ -907,7 +907,7 @@
                                     <div class="text-sm font-bold text-teal-400 mb-3 flex items-center gap-2">
                                         <i class="fas fa-database"></i> 本地钱包持仓缓存状态
                                     </div>
-                                    <div class="grid grid-cols-3 gap-3 text-center">
+                                    <div class="grid grid-cols-3 gap-3 text-center mb-4">
                                         <div class="bg-gray-800 p-3 rounded border border-gray-700">
                                             <div class="text-xs text-gray-400">已存钱包数</div>
                                             <div class="text-lg font-bold text-white mt-1">{{ cache_stats.wallet_count }}</div>
@@ -920,6 +920,11 @@
                                             <div class="text-xs text-gray-400">数据库大小</div>
                                             <div class="text-lg font-bold text-white mt-1">{{ cache_stats.db_size }}</div>
                                         </div>
+                                    </div>
+                                    <div class="pt-3 border-t border-gray-800">
+                                        <label class="block text-xs font-bold text-gray-400 mb-2">缓存写入起播阈值 (TAO)</label>
+                                        <input type="number" name="cache_threshold_tao" value="{{ settings.cache_threshold_tao or '60.0' }}" step="0.1" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-sm text-white focus:border-blue-500 focus:outline-none shadow-inner">
+                                        <p class="text-[10px] text-gray-500 mt-1">单笔交易金额达到或超过此阈值时，才会为该钱包首次建立本地持仓缓存。后续低于该阈值的交易会自动利用差量更新缓存，但不会执行链上查仓校准。</p>
                                     </div>
                                 </div>
                             </div>

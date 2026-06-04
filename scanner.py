@@ -1257,8 +1257,15 @@ def check_and_alert(
             chat_id=chat_id,
         )
         
-        # 将链上查询任务提交到扫描器固定线程池异步校对
-        if lookup_netuid is not None:
+        # 读取配置的本地缓存写入阈值
+        try:
+            cache_threshold = float(db.get_setting("cache_threshold_tao", "60.0"))
+        except Exception:
+            cache_threshold = 60.0
+            
+        amount_for_cache = threshold_amount or amount
+        # 仅在金额达到或超过缓存阈值时，才提交异步任务进行链上查仓以创建/校准缓存
+        if lookup_netuid is not None and amount_for_cache >= cache_threshold:
             SCANNER_EXECUTOR.submit(
                 background_query_and_update,
                 audit_id, address, lookup_netuid, msg, bot_token, chat_id, reply_markup
