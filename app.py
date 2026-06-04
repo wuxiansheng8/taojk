@@ -805,6 +805,9 @@ def _query_blockchain_data(dwellir_wss, address, netuid):
                 alpha_type = get_storage_value_type("SubtensorModule", "Alpha")
                 alpha_v2_type = get_storage_value_type("SubtensorModule", "AlphaV2")
                 stake_type = get_storage_value_type("SubtensorModule", "Stake")
+                total_shares_type = get_storage_value_type("SubtensorModule", "TotalHotkeyShares")
+                total_shares_v2_type = get_storage_value_type("SubtensorModule", "TotalHotkeySharesV2")
+                total_alpha_type = get_storage_value_type("SubtensorModule", "TotalHotkeyAlpha")
                 
                 for hk in hotkeys:
                     hk_str = hk[0] if isinstance(hk, (list, tuple)) else hk
@@ -834,6 +837,42 @@ def _query_blockchain_data(dwellir_wss, address, netuid):
                             key_mapping[k_alphav2] = (hk_str, "AlphaV2", alpha_v2_type)
                         except Exception:
                             pass
+
+                    if total_shares_type:
+                        try:
+                            k_shares = StorageKey.create_from_storage_function(
+                                "SubtensorModule", "TotalHotkeyShares", [hk_str, int(netuid)],
+                                runtime_config=substrate.runtime_config,
+                                metadata=substrate.metadata
+                            ).to_hex()
+                            storage_keys.append(k_shares)
+                            key_mapping[k_shares] = (hk_str, "TotalShares", total_shares_type)
+                        except Exception:
+                            pass
+
+                    if total_shares_v2_type:
+                        try:
+                            k_shares_v2 = StorageKey.create_from_storage_function(
+                                "SubtensorModule", "TotalHotkeySharesV2", [hk_str, int(netuid)],
+                                runtime_config=substrate.runtime_config,
+                                metadata=substrate.metadata
+                            ).to_hex()
+                            storage_keys.append(k_shares_v2)
+                            key_mapping[k_shares_v2] = (hk_str, "TotalSharesV2", total_shares_v2_type)
+                        except Exception:
+                            pass
+
+                    if total_alpha_type:
+                        try:
+                            k_tot_alpha = StorageKey.create_from_storage_function(
+                                "SubtensorModule", "TotalHotkeyAlpha", [hk_str, int(netuid)],
+                                runtime_config=substrate.runtime_config,
+                                metadata=substrate.metadata
+                            ).to_hex()
+                            storage_keys.append(k_tot_alpha)
+                            key_mapping[k_tot_alpha] = (hk_str, "TotalAlpha", total_alpha_type)
+                        except Exception:
+                            pass
                             
                     if stake_type:
                         try:
@@ -854,6 +893,9 @@ def _query_blockchain_data(dwellir_wss, address, netuid):
                 hotkey_alpha_v2 = {}
                 hotkey_alpha = {}
                 hotkey_stake = {}
+                hotkey_total_shares = {}
+                hotkey_total_shares_v2 = {}
+                hotkey_total_alpha = {}
 
                 for chunk in chunks:
                     try:
@@ -885,6 +927,12 @@ def _query_blockchain_data(dwellir_wss, address, netuid):
                                             hotkey_alpha[hk_str] = val
                                         elif storage_name == "Stake":
                                             hotkey_stake[hk_str] = val
+                                        elif storage_name == "TotalShares":
+                                            hotkey_total_shares[hk_str] = val
+                                        elif storage_name == "TotalSharesV2":
+                                            hotkey_total_shares_v2[hk_str] = val
+                                        elif storage_name == "TotalAlpha":
+                                            hotkey_total_alpha[hk_str] = val
                     except Exception as chunk_err:
                         db.add_log("ERROR", f"批量查询子网 Alpha 余额分块出错: {str(chunk_err)}")
 
@@ -894,9 +942,21 @@ def _query_blockchain_data(dwellir_wss, address, netuid):
                     if not isinstance(hk_str, str):
                         continue
                     
-                    val_v2 = hotkey_alpha_v2.get(hk_str, 0.0)
-                    val_v1 = hotkey_alpha.get(hk_str, 0.0)
+                    val_v2_shares = hotkey_alpha_v2.get(hk_str, 0.0)
+                    val_v1_shares = hotkey_alpha.get(hk_str, 0.0)
                     val_stake = hotkey_stake.get(hk_str, 0.0)
+                    
+                    tot_shares_v2 = hotkey_total_shares_v2.get(hk_str, 0.0)
+                    tot_shares_v1 = hotkey_total_shares.get(hk_str, 0.0)
+                    tot_alpha = hotkey_total_alpha.get(hk_str, 0.0)
+                    
+                    val_v2 = 0.0
+                    if tot_shares_v2 > 0:
+                        val_v2 = (val_v2_shares / tot_shares_v2) * tot_alpha
+                        
+                    val_v1 = 0.0
+                    if tot_shares_v1 > 0:
+                        val_v1 = (val_v1_shares / tot_shares_v1) * tot_alpha
                     
                     selected = val_v2 if val_v2 > 0 else val_v1
                     if selected <= 0:
