@@ -955,7 +955,7 @@ def build_alert_message(
     if group_type == "wallet":
         msg = f"{icon} {safe_text(action)} SN{safe_text(format_netuid(netuid))}\n"
         if received_tao is not None:
-            msg += f"{icon} Swap {received_tao:.4f} T\n"
+            msg += f"{icon} Swap {received_tao:.4f} 𝞃\n"
         else:
             msg += f"{icon} Swap {amount:.4f} {unit}\n"
 
@@ -974,7 +974,7 @@ def build_alert_message(
     # 巨鲸组
     msg = f"{icon} {safe_text(action)} SN{safe_text(format_netuid(netuid))}\n"
     if received_tao is not None:
-        msg += f"{icon} Swap {received_tao:.4f} T\n\n"
+        msg += f"{icon} Swap {received_tao:.4f} 𝞃\n\n"
     else:
         msg += f"{icon} Swap {amount:.4f} {unit}\n\n"
 
