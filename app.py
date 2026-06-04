@@ -223,18 +223,15 @@ def api_status(request: Request):
 @app.get("/api/test_wss/{slot}")
 def api_test_wss(request: Request, slot: str):
     check_login(request)
-    if slot not in {"primary", "backup", "query"}:
+    if slot not in {"primary", "backup"}:
         raise HTTPException(status_code=400, detail="invalid slot")
 
     if slot == "primary":
         key = "dwellir_wss"
         default = "wss://api-bittensor-mainnet.n.dwellir.com"
-    elif slot == "backup":
+    else:
         key = "dwellir_wss_backup"
         default = ""
-    else:
-        key = "query_wss"
-        default = "wss://api-bittensor-mainnet.n.dwellir.com"
 
     raw_url = db.get_setting(key, default).strip()
     if not raw_url:
@@ -325,7 +322,6 @@ def settings_page(request: Request):
         "wss_load_balance": db.get_setting("wss_load_balance", "0"),
         "tg_throttle_ms": db.get_setting("tg_throttle_ms", "500"),
         "public_url": db.get_setting("public_url", ""),
-        "query_wss": db.get_setting("query_wss", ""),
     }
     cache_stats = db.get_cache_stats()
     uptime_sec = get_uptime_seconds()
@@ -437,7 +433,6 @@ def save_sys_settings(
     wss_load_balance: str = Form("0"), 
     tg_throttle_ms: str = Form(...),
     public_url: str = Form(""),
-    query_wss: str = Form(""),
     csrf_token: str = Form(...)
 ):
     check_login(request)
@@ -455,7 +450,6 @@ def save_sys_settings(
     db.set_setting("wss_load_balance", "1" if wss_load_balance == "1" else "0")
     db.set_setting("tg_throttle_ms", tg_throttle_ms)
     db.set_setting("public_url", public_url_clean)
-    db.set_setting("query_wss", query_wss.strip())
     
     # 重置独立的查询连接，强制下次查询时重新建连
     with position_query.QUERY_SUBSTRATE_LOCK:
@@ -759,11 +753,7 @@ def handle_tg_callback(bot_token, callback_query):
     edit_message_reply_markup(bot_token, chat_id, message_id, loading_reply_markup)
 
     # 5. 执行链上查询
-    dwellir_wss = db.get_setting("query_wss", "").strip()
-    if not dwellir_wss:
-        dwellir_wss = db.get_setting("dwellir_wss", "wss://api-bittensor-mainnet.n.dwellir.com").strip()
-    if not dwellir_wss:
-        dwellir_wss = "wss://api-bittensor-mainnet.n.dwellir.com"
+    dwellir_wss = db.get_setting("dwellir_wss", "wss://api-bittensor-mainnet.n.dwellir.com").strip()
         
     original_text = get_original_text(address, netuid, message)
     start_time = time.perf_counter()

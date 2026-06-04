@@ -80,11 +80,7 @@ def background_query_and_update(audit_id, address, netuid, original_msg, bot_tok
             except Exception:
                 pass
 
-        dwellir_wss = db.get_setting("query_wss", "").strip()
-        if not dwellir_wss:
-            dwellir_wss = db.get_setting("dwellir_wss", "wss://api-bittensor-mainnet.n.dwellir.com").strip()
-        if not dwellir_wss:
-            dwellir_wss = "wss://api-bittensor-mainnet.n.dwellir.com"
+        dwellir_wss = db.get_setting("dwellir_wss", "wss://api-bittensor-mainnet.n.dwellir.com").strip()
             
         try:
             free_tao, alpha_stake, equivalent_tao, price = position_query._query_blockchain_data(dwellir_wss, address, netuid)

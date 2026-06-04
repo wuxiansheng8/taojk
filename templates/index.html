@@ -902,15 +902,7 @@
                                     <input type="text" name="public_url" value="{{ settings.public_url or '' }}" placeholder="https://your-domain.com" class="w-full bg-gray-900 border border-gray-700 rounded p-3 text-sm focus:border-blue-500 focus:outline-none shadow-inner">
                                     <p class="text-xs text-gray-500 mt-2">系统将自动向 Telegram 注册 Webhook 接口以支持仓位查询按钮。<b>必须以 https:// 开头</b>（Telegram 仅支持公网 HTTPS 接口，否则按钮回调无法生效）。</p>
                                 </div>
-                                <div>
-                                    <label class="block text-sm font-bold mb-2">余额查询 WSS (例如: wss://api-bittensor-mainnet.n.dwellir.com)</label>
-                                    <div class="flex gap-3">
-                                        <input type="text" name="query_wss" value="{{ settings.query_wss or '' }}" placeholder="wss://api-bittensor-mainnet.n.dwellir.com" class="flex-1 bg-gray-900 border border-gray-700 rounded p-3 text-sm focus:border-blue-500 focus:outline-none shadow-inner">
-                                        <button type="button" onclick="testWssEndpoint('query')" class="shrink-0 bg-gray-700 hover:bg-gray-600 px-4 py-3 rounded text-sm font-bold">测试</button>
-                                    </div>
-                                    <p class="text-xs text-gray-500 mt-2">点击 Telegram 卡片按钮时，将使用此独立连接查询仓位，避免拖慢或影响后台主扫描器。</p>
-                                    <p id="query-test-result" class="text-xs mt-2 text-gray-400"></p>
-                                </div>
+
                                 <div class="border border-gray-700 rounded-lg p-4 bg-gray-900/40 mt-4">
                                     <div class="text-sm font-bold text-teal-400 mb-3 flex items-center gap-2">
                                         <i class="fas fa-database"></i> 本地钱包持仓缓存状态
