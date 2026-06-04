@@ -846,6 +846,8 @@ def _query_blockchain_data(dwellir_wss, address, netuid):
                 for chunk in chunks:
                     try:
                         response = substrate.rpc_request("state_queryStorageAt", [chunk])
+                        if isinstance(response, dict) and "result" in response:
+                            response = response["result"]
                         if isinstance(response, list) and len(response) > 0:
                             changes = response[0].get("changes", [])
                             for k_hex, v_hex in changes:
@@ -910,6 +912,8 @@ def _query_blockchain_data(dwellir_wss, address, netuid):
                 ).to_hex()
                 
                 response = substrate.rpc_request("state_queryStorageAt", [[key_tao_pool, key_alpha_pool]])
+                if isinstance(response, dict) and "result" in response:
+                    response = response["result"]
                 
                 tao_pool = 0.0
                 alpha_pool = 0.0
