@@ -914,7 +914,7 @@ def build_alert_message(
             msg += f"{amount:.4f} {unit}\n"
             alias = alias_from or alias_to or ""
             if alias:
-                msg += f" <b>备注：{safe_text(alias)}</b>\n"
+                msg += f"🏷️ <b>备注：{safe_text(alias)}</b>\n"
             msg += f"From: <code>{safe_text(from_address)}</code>\n"
             msg += f"To: <code>{safe_text(to_address)}</code>\n"
             return msg
@@ -962,7 +962,7 @@ def build_alert_message(
         msg += "\n"
 
         if alias_address:
-            msg += f"<b>备注：{safe_text(alias_address)}</b>\n"
+            msg += f"🏷️ <b>备注：{safe_text(alias_address)}</b>\n"
 
         msg += f"👤 钱包地址: <code>{safe_text(short_address(address))}</code>\n"
         return msg
