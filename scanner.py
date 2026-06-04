@@ -914,7 +914,7 @@ def build_alert_message(
             msg += f"{amount:.4f} {unit}\n"
             alias = alias_from or alias_to or ""
             if alias:
-                msg += f" 备注：{safe_text(alias)}\n"
+                msg += f" <b>备注：{safe_text(alias)}</b>\n"
             msg += f"From: <code>{safe_text(from_address)}</code>\n"
             msg += f"To: <code>{safe_text(to_address)}</code>\n"
             return msg
@@ -953,14 +953,14 @@ def build_alert_message(
 
     # 钱包监控组
     if group_type == "wallet":
-        msg = f"{icon} <b>{safe_text(action)} SN{safe_text(format_netuid(netuid))}</b>\n"
+        msg = f"{icon} {safe_text(action)} SN{safe_text(format_netuid(netuid))}\n"
         if received_tao is not None:
             msg += f"{icon} Swap {received_tao:.4f} TAO\n"
         else:
             msg += f"{icon} Swap {amount:.4f} {unit}\n"
 
         if alias_address:
-            msg += f" 备注：{safe_text(alias_address)}\n\n"
+            msg += f" <b>备注：{safe_text(alias_address)}</b>\n\n"
         else:
             msg += "\n"
 
@@ -976,7 +976,7 @@ def build_alert_message(
         return msg
 
     # 巨鲸组
-    msg = f"{icon} <b>{safe_text(action)} SN{safe_text(format_netuid(netuid))}</b>\n"
+    msg = f"{icon} {safe_text(action)} SN{safe_text(format_netuid(netuid))}\n"
     if received_tao is not None:
         msg += f"{icon} Swap {received_tao:.4f} TAO\n\n"
     else:
