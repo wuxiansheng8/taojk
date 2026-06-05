@@ -68,7 +68,7 @@ def background_query_and_update(audit_id, address, netuid, original_msg, bot_tok
     lock = get_query_lock(address, netuid)
     with lock:
         cached = db.get_wallet_cache(address, netuid)
-        if cached:
+        if cached and cached.get("dirty") == 0:
             try:
                 dt = datetime.strptime(cached["updated_at"], "%Y-%m-%d %H:%M:%S")
                 if (datetime.now(timezone.utc).replace(tzinfo=None) - dt).total_seconds() < 3.0:
@@ -297,12 +297,6 @@ def build_inline_keyboard(tx_ref=None, netuid=None, address=None):
 
     if profile_link:
         buttons.append({"text": "💰 查看当前钱包地址", "url": profile_link})
-
-    if address and netuid is not None:
-        # 如果为挪仓 netuid="110->15"，直接提取目标子网 "15" 作为按钮回调子网号
-        query_netuid = str(netuid).split("->")[-1] if "->" in str(netuid) else netuid
-        query_btn = {"text": "🔍 查当前子网仓位", "callback_data": f"qb:{query_netuid}:{address}"}
-        return {"inline_keyboard": [[query_btn] + buttons]}
 
     if not buttons:
         return None
@@ -1264,11 +1258,19 @@ def check_and_alert(
             cache_threshold = 60.0
             
         amount_for_cache = threshold_amount or amount
-        # 仅在金额达到或超过缓存阈值时，才提交异步任务进行链上查仓以创建/校准缓存
-        if lookup_netuid is not None and amount_for_cache >= cache_threshold:
+        # 只要是监控的钱包分组，或者金额达到/超过缓存阈值，就提交异步任务进行链上查仓以创建/校准缓存，并纠正 TG 消息
+        should_query = (group.get("type") == "wallet") or (amount_for_cache >= cache_threshold)
+        
+        if lookup_netuid is not None and should_query:
             SCANNER_EXECUTOR.submit(
                 background_query_and_update,
-                audit_id, address, lookup_netuid, msg, bot_token, chat_id, reply_markup
+                audit_id=audit_id,
+                address=address,
+                netuid=lookup_netuid,
+                original_msg=msg,
+                bot_token=bot_token,
+                chat_id=chat_id,
+                reply_markup=reply_markup,
             )
 
 def alert_from_stake_events(events, tx_ref=None, tx_hash=None):

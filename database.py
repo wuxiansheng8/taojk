@@ -168,7 +168,7 @@ def init_db():
         table_info = conn.execute("PRAGMA table_info(wallets_cache)").fetchall()
         if table_info:
             pk_cols = [row["name"] for row in table_info if row["pk"] > 0]
-            if pk_cols and set(pk_cols) != {"address", "netuid"}:
+            if set(pk_cols) != {"address", "netuid"}:
                 c.execute("DROP TABLE wallets_cache")
     except Exception:
         pass
@@ -186,6 +186,12 @@ def init_db():
             PRIMARY KEY (address, netuid)
         )
     ''')
+    
+    # 检查 wallets_cache 表是否缺少 dirty 字段，若缺少则通过 ALTER TABLE 新增
+    cache_columns = {row["name"] for row in conn.execute("PRAGMA table_info(wallets_cache)").fetchall()}
+    if cache_columns and "dirty" not in cache_columns:
+        conn.execute("ALTER TABLE wallets_cache ADD COLUMN dirty INTEGER DEFAULT 0")
+
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('cache_threshold_tao', '60.0')")
 
     # --- 性能优化：创建常用索引 ---
@@ -448,7 +454,7 @@ def get_notification_success_rate(hours=24):
 def get_wallet_cache(address, netuid):
     conn = get_db()
     row = conn.execute(
-        "SELECT free_tao, alpha_stake, equivalent_tao, price, updated_at FROM wallets_cache WHERE address = ? AND netuid = ?",
+        "SELECT free_tao, alpha_stake, equivalent_tao, price, updated_at, dirty FROM wallets_cache WHERE address = ? AND netuid = ?",
         (address, int(netuid))
     ).fetchone()
     conn.close()
@@ -498,7 +504,7 @@ def update_wallet_cache_delta(address, netuid, action, amount, alpha_amount=None
         conn.execute(
             """
             UPDATE wallets_cache
-            SET free_tao = ?, alpha_stake = ?, equivalent_tao = ?, updated_at = CURRENT_TIMESTAMP
+            SET free_tao = ?, alpha_stake = ?, equivalent_tao = ?, updated_at = CURRENT_TIMESTAMP, dirty = 1
             WHERE address = ? AND netuid = ?
             """,
             (free_tao, alpha_stake, equivalent_tao, address, int(netuid))

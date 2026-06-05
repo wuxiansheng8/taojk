@@ -14,21 +14,8 @@ import requests
 import html
 import concurrent.futures
 
-# 全局查询线程池，避免高频点击时重复新建线程池的开销
-QUERY_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=5)
-
-# --- 专属查询长连接及锁机制 ---
-QUERY_SUBSTRATE = None
-QUERY_SUBSTRATE_LOCK = threading.Lock()
-QUERY_IO_LOCK = threading.Lock()
-
 # --- 缓存及并发防抖机制 ---
-QUERY_CACHE = {}
-QUERY_CACHE_LOCK = threading.Lock()
-CACHE_TTL = 30  # 30秒缓存
 
-IN_PROGRESS_QUERIES = set()
-IN_PROGRESS_LOCK = threading.Lock()
 
 import database as db
 import scanner
@@ -51,8 +38,7 @@ async def lifespan(app: FastAPI):
     # 启动扫描线程
     threading.Thread(target=scanner.start_scanner, daemon=True).start()
     
-    # 启动后异步自动注册 Webhook
-    register_all_webhooks()
+
     
     yield
     
@@ -378,7 +364,6 @@ def update_group(
     )
     # 修改配置成功后，立刻重置内存中旧的 TG 报错状态，确保主页卡片状态实时刷新
     scanner.LAST_TG_ERROR = ""
-    register_all_webhooks()
     return RedirectResponse(f"/monitoring?open_group={id}", status_code=303)
 
 @app.post("/group/rename/{id}")
@@ -392,14 +377,20 @@ def rename_group(request: Request, id: int, name: str = Form(...), csrf_token: s
 def delete_group(request: Request, id: int, csrf_token: str = Form(...)):
     check_login(request)
     verify_csrf(request, csrf_token)
-    db.execute_write("DELETE FROM monitor_groups WHERE id=?", (id,))
+    def operation(conn):
+        conn.execute("DELETE FROM monitor_groups WHERE id=?", (id,))
+        conn.execute("DELETE FROM wallets_cache WHERE address NOT IN (SELECT address FROM wallets)")
+    db.execute_write_returning(operation)
     return RedirectResponse("/monitoring", status_code=303)
 
 @app.post("/wallet/add")
 def add_wallet(request: Request, group_id: int = Form(...), address: str = Form(...), alias: str = Form(...), csrf_token: str = Form(...)):
     check_login(request)
     verify_csrf(request, csrf_token)
-    db.execute_write("INSERT INTO wallets (group_id, address, alias) VALUES (?, ?, ?)", (group_id, address.strip(), alias.strip()))
+    addr_clean = address.strip()
+    db.execute_write("INSERT INTO wallets (group_id, address, alias) VALUES (?, ?, ?)", (group_id, addr_clean, alias.strip()))
+    # 在后台线程中立即为该监控钱包初始化拉取并建立持仓缓存
+    threading.Thread(target=position_query.initialize_wallet_cache, args=(addr_clean,), daemon=True).start()
     return RedirectResponse(f"/monitoring?open_group={group_id}", status_code=303)
 
 @app.post("/wallet/toggle/{id}")
@@ -419,9 +410,13 @@ def del_wallet(request: Request, id: int, csrf_token: str = Form(...)):
     check_login(request)
     verify_csrf(request, csrf_token)
     def operation(conn):
-        wallet = conn.execute("SELECT group_id FROM wallets WHERE id=?", (id,)).fetchone()
-        conn.execute("DELETE FROM wallets WHERE id=?", (id,))
-        return wallet["group_id"] if wallet else ""
+        wallet = conn.execute("SELECT group_id, address FROM wallets WHERE id=?", (id,)).fetchone()
+        if wallet:
+            addr = wallet["address"]
+            conn.execute("DELETE FROM wallets WHERE id=?", (id,))
+            conn.execute("DELETE FROM wallets_cache WHERE address = ? AND NOT EXISTS (SELECT 1 FROM wallets WHERE address = ?)", (addr, addr))
+            return wallet["group_id"]
+        return ""
 
     group_id = db.execute_write_returning(operation)
     return RedirectResponse(f"/monitoring?open_group={group_id}", status_code=303)
@@ -433,28 +428,18 @@ def save_sys_settings(
     dwellir_wss_backup: str = Form(""), 
     wss_load_balance: str = Form("0"), 
     tg_throttle_ms: str = Form(...),
-    public_url: str = Form(""),
     cache_threshold_tao: str = Form("60.0"),
     csrf_token: str = Form(...)
 ):
     check_login(request)
     verify_csrf(request, csrf_token)
     
-    public_url_clean = public_url.strip()
-    if public_url_clean and not public_url_clean.lower().startswith("https://"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="公网基础 URL 必须以 https:// 开头，Telegram Webhook 仅支持 HTTPS 地址。"
-        )
-        
     db.set_setting("dwellir_wss", dwellir_wss.strip())
     db.set_setting("dwellir_wss_backup", dwellir_wss_backup.strip())
     db.set_setting("wss_load_balance", "1" if wss_load_balance == "1" else "0")
     db.set_setting("tg_throttle_ms", tg_throttle_ms)
-    db.set_setting("public_url", public_url_clean)
     db.set_setting("cache_threshold_tao", cache_threshold_tao.strip())
     
-    # 重置独立的查询连接，强制下次查询时重新建连
     with position_query.QUERY_SUBSTRATE_LOCK:
         if position_query.QUERY_SUBSTRATE:
             try:
@@ -463,7 +448,6 @@ def save_sys_settings(
                 pass
             position_query.QUERY_SUBSTRATE = None
 
-    register_all_webhooks()
     return RedirectResponse("/settings", status_code=303)
 
 @app.post("/test_tg/{group_id}")
@@ -544,7 +528,6 @@ def import_wallets(request: Request, file: UploadFile = File(...), csrf_token: s
     check_login(request)
     verify_csrf(request, csrf_token)
     
-    # 性能优化：直接使用同步读取，避免事件循环空转
     raw = file.file.read()
     text = raw.decode("utf-8")
     parsed_groups = parse_wallet_txt(text)
@@ -580,11 +563,6 @@ def import_wallets(request: Request, file: UploadFile = File(...), csrf_token: s
                         (group_id, wallet["address"], wallet["alias"])
                     )
 
-    db.execute_write_returning(operation)
-    return RedirectResponse("/monitoring", status_code=303)
-
-# --- Telegram Webhook Helper Functions ---
-
 def extract_numeric_value(obj):
     """提取 Substrate 节点返回数据中各种嵌套类型的数值 (兼容 dict/SafeFloat/U64/ScaleObj 等)"""
     if obj is None:
@@ -605,238 +583,14 @@ def extract_numeric_value(obj):
         return extract_numeric_value(obj.value)
     return 0.0
 
-def register_webhook(bot_token, public_url):
-    if not bot_token or not public_url:
-        return
-    token_hash = hashlib.md5(bot_token.encode("utf-8")).hexdigest()
-    # 生成安全的 Webhook 验证 Secret Token
-    secret_token = hashlib.sha256((bot_token + session_secret).encode("utf-8")).hexdigest()
-    url = public_url.strip().rstrip('/')
-    webhook_url = f"{url}/tg/webhook/{token_hash}"
-    api_url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
-    try:
-        res = requests.post(api_url, json={"url": webhook_url, "secret_token": secret_token}, timeout=5)
-        if res.ok:
-            db.add_log("INFO", f"TG 机器人 Webhook 注册成功: {token_hash[:8]}...")
-        else:
-            db.add_log("ERROR", f"TG 机器人 Webhook 注册失败 ({res.status_code}): {res.text[:200]}")
-    except Exception as e:
-        db.add_log("ERROR", f"TG 机器人 Webhook 注册发生异常: {str(e)}")
-
-def register_all_webhooks():
-    public_url = db.get_setting("public_url", "").strip()
-    if not public_url:
-        db.add_log("INFO", "未配置公网 URL，跳过 TG Webhook 注册")
-        return
-    
-    tokens = set()
-    groups = db.get_groups()
-    for g in groups:
-        if g.get("tg_token"):
-            tokens.add(g["tg_token"].strip())
-        if g.get("tg_token_backup"):
-            tokens.add(g["tg_token_backup"].strip())
-            
-    for token in tokens:
-        threading.Thread(target=register_webhook, args=(token, public_url), daemon=True).start()
-
-def edit_message_text(bot_token, chat_id, message_id, original_text, append_text, reply_markup=None):
-    scanner.edit_message_text(bot_token, chat_id, message_id, original_text, append_text, reply_markup)
-
-def edit_message_reply_markup(bot_token, chat_id, message_id, reply_markup):
-    scanner.edit_message_reply_markup(bot_token, chat_id, message_id, reply_markup)
-
-def _query_blockchain_data(dwellir_wss, address, netuid):
-    return position_query._query_blockchain_data(dwellir_wss, address, netuid)
-
-def get_original_text(address, netuid, message):
-    original_text = ""
-    try:
-        conn = db.get_db()
-        row = conn.execute(
-            "SELECT message FROM notification_audit_logs "
-            "WHERE (address = ? OR from_address = ? OR to_address = ?) AND netuid = ? "
-            "ORDER BY created_at DESC LIMIT 1",
-            (address, address, address, str(netuid))
-        ).fetchone()
-        conn.close()
-        if row and row["message"]:
-            original_text = row["message"]
-    except Exception as e:
-        db.add_log("WARN", f"从审计日志获取 HTML 原始消息出错: {str(e)}")
-        
-    if not original_text:
-        original_text = html.escape(message.get("text") or "")
-    return original_text
-
-def format_balance_info(netuid, free_tao, alpha_stake, equivalent_tao, price):
-    return position_query.format_balance_info(netuid, free_tao, alpha_stake, equivalent_tao, price)
-
-def handle_tg_callback(bot_token, callback_query):
-    callback_id = callback_query.get("id")
-    callback_data = callback_query.get("data", "")
-    message = callback_query.get("message")
-    if not message:
-        return
-        
-    chat_id = message["chat"]["id"]
-    message_id = message["message_id"]
-    
-    # 解析 callback_data: qb:{netuid}:{address}
-    parts = callback_data.split(":")
-    if len(parts) < 3:
-        return
-    netuid = parts[1]
-    address = parts[2]
-    
-    cache_key = (address, netuid)
-    
-    # 1. 检查缓存
-    now = time.time()
-    cached_val = None
-    with QUERY_CACHE_LOCK:
-        if cache_key in QUERY_CACHE:
-            ts, free_tao, alpha_stake, equivalent_tao, price = QUERY_CACHE[cache_key]
-            if now - ts < CACHE_TTL:
-                cached_val = (free_tao, alpha_stake, equivalent_tao, price)
-                
-    if cached_val:
-        free_tao, alpha_stake, equivalent_tao, price = cached_val
-        # 回复 Telegram 消除转圈并提示使用缓存
-        ans_url = f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery"
-        try:
-            requests.post(ans_url, json={"callback_query_id": callback_id, "text": "已获取最新仓位(缓存)"}, timeout=5)
-        except Exception:
-            pass
-            
-        original_text = get_original_text(address, netuid, message)
-        balance_info = format_balance_info(netuid, free_tao, alpha_stake, equivalent_tao, price)
-        edit_message_text(bot_token, chat_id, message_id, original_text, balance_info, message.get("reply_markup"))
-        return
-
-    # 2. 检查是否正在查询中
-    is_in_progress = False
-    with IN_PROGRESS_LOCK:
-        if cache_key in IN_PROGRESS_QUERIES:
-            is_in_progress = True
-        else:
-            IN_PROGRESS_QUERIES.add(cache_key)
-            
-    if is_in_progress:
-        # 发现已有并发请求正在链上查询中，直接通过小气泡提醒用户，不编辑消息也不发起新查询
-        ans_url = f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery"
-        try:
-            requests.post(ans_url, json={
-                "callback_query_id": callback_id,
-                "text": "⏳ 正在为您获取最新仓位，请勿重复点击...",
-                "show_alert": False
-            }, timeout=5)
-        except Exception:
-            pass
-        return
-
-    # 3. 新查询：回复 Telegram 消除转圈，提示正在获取
-    ans_url = f"https://api.telegram.org/bot{bot_token}/answerCallbackQuery"
-    try:
-        requests.post(ans_url, json={"callback_query_id": callback_id, "text": "正在为您获取最新仓位..."}, timeout=5)
-    except Exception:
-        pass
-
-    # 4. 深度克隆原始与加载中的 reply_markup 并把点击的按钮文字改为“⏳ 查询中...”
-    import copy
-    original_reply_markup = copy.deepcopy(message.get("reply_markup", {}))
-    loading_reply_markup = copy.deepcopy(original_reply_markup)
-    if "inline_keyboard" in loading_reply_markup:
-        for row in loading_reply_markup["inline_keyboard"]:
-            for btn in row:
-                if btn.get("callback_data") == callback_data:
-                    btn["text"] = "⏳ 查询中..."
-    
-    # 立即更新按钮为“查询中”状态
-    edit_message_reply_markup(bot_token, chat_id, message_id, loading_reply_markup)
-
-    # 5. 执行链上查询
-    dwellir_wss = db.get_setting("dwellir_wss", "wss://api-bittensor-mainnet.n.dwellir.com").strip()
-        
-    original_text = get_original_text(address, netuid, message)
-    start_time = time.perf_counter()
-    is_edited = False
-    try:
-        # 复用全局线程池 QUERY_EXECUTOR 提交，防止重复创建线程池开销
-        future = QUERY_EXECUTOR.submit(_query_blockchain_data, dwellir_wss, address, netuid)
-        free_tao, alpha_stake, equivalent_tao, price = future.result(timeout=15.0)  # 15秒查询超时
-        
-        # 写入缓存
-        with QUERY_CACHE_LOCK:
-            QUERY_CACHE[cache_key] = (time.time(), free_tao, alpha_stake, equivalent_tao, price)
-            
-        # 同时同步到 SQLite 本地缓存
-        try:
-            db.update_wallet_cache(address, netuid, free_tao, alpha_stake, equivalent_tao, price)
-        except Exception as cache_err:
-            db.add_log("WARN", f"Webhook 查询更新本地 SQLite 缓存失败: {str(cache_err)}")
-            
-        duration_ms = int((time.perf_counter() - start_time) * 1000)
-        db.add_log("INFO", f"仓位查询完成: 用时 {duration_ms}ms, 目标: {address}, 子网: {netuid}")
-        
-        balance_info = format_balance_info(netuid, free_tao, alpha_stake, equivalent_tao, price)
-        edit_message_text(bot_token, chat_id, message_id, original_text, balance_info, original_reply_markup)
-        is_edited = True
-        
-    except concurrent.futures.TimeoutError:
-        db.add_log("ERROR", "执行 Webhook 链上余额查询超时 (15秒)")
-        edit_message_text(bot_token, chat_id, message_id, original_text, "\n\n❌ 当前仓位查询超时，请稍后再试", original_reply_markup)
-        is_edited = True
-    except Exception as e:
-        db.add_log("ERROR", f"执行 Webhook 链上余额查询时发生异常: {str(e)}")
-        edit_message_text(bot_token, chat_id, message_id, original_text, "\n\n❌ 当前仓位查询超时，请稍后再试", original_reply_markup)
-        is_edited = True
-    finally:
-        # 如果因意外情况或网络报错导致上面的消息编辑复原逻辑未执行，在 finally 里强制进行兜底恢复
-        if not is_edited:
-            edit_message_reply_markup(bot_token, chat_id, message_id, original_reply_markup)
-        with IN_PROGRESS_LOCK:
-            IN_PROGRESS_QUERIES.discard(cache_key)
-
-@app.post("/tg/webhook/{token_md5}")
-async def tg_webhook(token_md5: str, request: Request, background_tasks: BackgroundTasks):
-    try:
-        payload = await request.json()
-    except Exception:
-        return JSONResponse({"ok": False, "error": "Invalid JSON"}, status_code=400)
-    
-    callback_query = payload.get("callback_query")
-    if not callback_query:
-        return JSONResponse({"ok": True})
-        
-    callback_data = callback_query.get("data", "")
-    if not callback_data.startswith("qb:"):
-        return JSONResponse({"ok": True})
-        
-    # 查找 bot_token 鉴权
-    groups = db.get_groups()
-    bot_token = None
-    for g in groups:
-        for key in ("tg_token", "tg_token_backup"):
-            val = g.get(key)
-            if val and hashlib.md5(val.strip().encode("utf-8")).hexdigest() == token_md5:
-                bot_token = val.strip()
-                break
-        if bot_token:
-            break
-            
-    if not bot_token:
-        return JSONResponse({"ok": False, "error": "Unauthorized bot token"}, status_code=401)
-        
-    # 安全防护：校验 Telegram secret_token 报头，确保请求来自于真实 Telegram API
-    received_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
-    expected_secret = hashlib.sha256((bot_token + session_secret).encode("utf-8")).hexdigest()
-    if received_secret != expected_secret:
-        db.add_log("WARN", f"TG Webhook 鉴权失败: Secret Token 不匹配")
-        return JSONResponse({"ok": False, "error": "Unauthorized secret token"}, status_code=403)
-        
-    background_tasks.add_task(handle_tg_callback, bot_token, callback_query)
-    return JSONResponse({"ok": True})
+@app.post("/api/clear_non_monitored_cache")
+def clear_non_monitored_cache(request: Request, csrf_token: str = Form(...)):
+    check_login(request)
+    verify_csrf(request, csrf_token)
+    def operation(conn):
+        conn.execute("DELETE FROM wallets_cache WHERE address NOT IN (SELECT address FROM wallets)")
+    db.execute_write_returning(operation)
+    return {"ok": True}
 
 if __name__ == "__main__":
     import uvicorn
