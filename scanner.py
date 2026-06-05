@@ -80,10 +80,8 @@ def background_query_and_update(audit_id, address, netuid, original_msg, bot_tok
             except Exception:
                 pass
 
-        dwellir_wss = db.get_setting("dwellir_wss", "wss://api-bittensor-mainnet.n.dwellir.com").strip()
-            
         try:
-            free_tao, alpha_stake, equivalent_tao, price = position_query._query_blockchain_data(dwellir_wss, address, netuid)
+            free_tao, alpha_stake, equivalent_tao, price = position_query._query_blockchain_data(address, netuid)
             db.update_wallet_cache(address, netuid, free_tao, alpha_stake, equivalent_tao, price)
             balance_info = position_query.format_balance_info(netuid, free_tao, alpha_stake, equivalent_tao, price)
         except Exception as e:

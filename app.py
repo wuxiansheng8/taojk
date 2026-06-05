@@ -232,14 +232,20 @@ def api_status(request: Request):
 @app.get("/api/test_wss/{slot}")
 def api_test_wss(request: Request, slot: str):
     check_login(request)
-    if slot not in {"primary", "backup"}:
+    if slot not in {"primary", "backup", "query", "query_backup"}:
         raise HTTPException(status_code=400, detail="invalid slot")
 
     if slot == "primary":
         key = "dwellir_wss"
         default = "wss://api-bittensor-mainnet.n.dwellir.com"
-    else:
+    elif slot == "backup":
         key = "dwellir_wss_backup"
+        default = ""
+    elif slot == "query":
+        key = "query_wss"
+        default = ""
+    else:
+        key = "query_wss_backup"
         default = ""
 
     raw_url = db.get_setting(key, default).strip()
@@ -328,6 +334,8 @@ def settings_page(request: Request):
     settings = {
         "dwellir_wss": db.get_setting("dwellir_wss", "wss://api-bittensor-mainnet.n.dwellir.com"),
         "dwellir_wss_backup": db.get_setting("dwellir_wss_backup", ""),
+        "query_wss": db.get_setting("query_wss", ""),
+        "query_wss_backup": db.get_setting("query_wss_backup", ""),
         "wss_load_balance": db.get_setting("wss_load_balance", "0"),
         "tg_throttle_ms": db.get_setting("tg_throttle_ms", "500"),
         "public_url": db.get_setting("public_url", ""),
@@ -449,6 +457,8 @@ def save_sys_settings(
     request: Request, 
     dwellir_wss: str = Form(...), 
     dwellir_wss_backup: str = Form(""), 
+    query_wss: str = Form(""), 
+    query_wss_backup: str = Form(""), 
     wss_load_balance: str = Form("0"), 
     tg_throttle_ms: str = Form(...),
     cache_threshold_tao: str = Form("60.0"),
@@ -459,6 +469,8 @@ def save_sys_settings(
     
     db.set_setting("dwellir_wss", dwellir_wss.strip())
     db.set_setting("dwellir_wss_backup", dwellir_wss_backup.strip())
+    db.set_setting("query_wss", query_wss.strip())
+    db.set_setting("query_wss_backup", query_wss_backup.strip())
     db.set_setting("wss_load_balance", "1" if wss_load_balance == "1" else "0")
     db.set_setting("tg_throttle_ms", tg_throttle_ms)
     db.set_setting("cache_threshold_tao", cache_threshold_tao.strip())

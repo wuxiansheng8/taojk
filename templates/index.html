@@ -882,6 +882,25 @@
                                     <p class="text-xs text-gray-500 mt-2">主接口连不上时会自动尝试备用接口。</p>
                                     <p id="backup-test-result" class="text-xs mt-2 text-gray-400"></p>
                                 </div>
+                                <div class="text-sm font-bold text-blue-300 border-b border-gray-700 pb-3 pt-6">余额查询专用通道 (WSS)</div>
+                                <div>
+                                    <label class="block text-sm font-bold mb-2">主查询接口</label>
+                                    <div class="flex gap-3">
+                                        <input type="text" name="query_wss" value="{{ settings.query_wss }}" placeholder="不填则默认复用主接口" class="flex-1 bg-gray-900 border border-gray-700 rounded p-3 text-sm focus:border-blue-500 focus:outline-none shadow-inner">
+                                        <button type="button" onclick="testWssEndpoint('query')" class="shrink-0 bg-gray-700 hover:bg-gray-600 px-4 py-3 rounded text-sm font-bold">测试</button>
+                                    </div>
+                                    <p class="text-xs text-gray-500 mt-2">专门用于钱包持仓与余额查询的通道。留空则复用上方的主接口。</p>
+                                    <p id="query-test-result" class="text-xs mt-2 text-gray-400"></p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-bold mb-2">备用查询接口</label>
+                                    <div class="flex gap-3">
+                                        <input type="text" name="query_wss_backup" value="{{ settings.query_wss_backup }}" placeholder="wss://..." class="flex-1 bg-gray-900 border border-gray-700 rounded p-3 text-sm focus:border-blue-500 focus:outline-none shadow-inner">
+                                        <button type="button" onclick="testWssEndpoint('query_backup')" class="shrink-0 bg-gray-700 hover:bg-gray-600 px-4 py-3 rounded text-sm font-bold">测试</button>
+                                    </div>
+                                    <p class="text-xs text-gray-500 mt-2">主查询接口连不上时会自动尝试备用查询接口。</p>
+                                    <p id="query_backup-test-result" class="text-xs mt-2 text-gray-400"></p>
+                                </div>
                             </div>
                             <div class="space-y-6">
                                 <div class="text-sm font-bold text-blue-300 border-b border-gray-700 pb-3">连接策略与 Telegram</div>
