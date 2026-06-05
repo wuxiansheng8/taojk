@@ -80,13 +80,34 @@ def background_query_and_update(audit_id, address, netuid, original_msg, bot_tok
             except Exception:
                 pass
 
-        try:
-            free_tao, alpha_stake, equivalent_tao, price = position_query._query_blockchain_data(address, netuid)
-            db.update_wallet_cache(address, netuid, free_tao, alpha_stake, equivalent_tao, price)
-            balance_info = position_query.format_balance_info(netuid, free_tao, alpha_stake, equivalent_tao, price)
-        except Exception as e:
-            db.add_log("ERROR", f"后台余额查询失败: {str(e)}")
-            return
+        last_error = ""
+        balance_info = ""
+        for attempt in range(2):
+            try:
+                free_tao, alpha_stake, equivalent_tao, price = position_query._query_blockchain_data(address, netuid)
+                db.update_wallet_cache(address, netuid, free_tao, alpha_stake, equivalent_tao, price)
+                balance_info = position_query.format_balance_info(netuid, free_tao, alpha_stake, equivalent_tao, price)
+                break
+            except Exception as e:
+                last_error = str(e)
+                if attempt == 0 and (
+                    "Connection to remote host was lost" in last_error
+                    or "Websocket connection is disconnected" in last_error
+                    or "connection to remote host was lost" in last_error.lower()
+                ):
+                    db.add_log("WARN", f"后台余额查询瞬断，准备自动重试: {last_error}")
+                    with position_query.QUERY_SUBSTRATE_LOCK:
+                        if position_query.QUERY_SUBSTRATE:
+                            try:
+                                position_query.QUERY_SUBSTRATE.close()
+                            except Exception:
+                                pass
+                            position_query.QUERY_SUBSTRATE = None
+                    time.sleep(0.5)
+                    continue
+
+                db.add_log("WARN", f"后台余额查询失败: {last_error}")
+                return
 
         _edit_tg_msg_now(audit_id, original_msg, balance_info, bot_token, chat_id, reply_markup)
 

@@ -99,6 +99,8 @@ def get_query_substrate(dwellir_wss=None):
 
 def _query_blockchain_data_with_substrate(substrate, address, netuid, free_tao=None, hotkeys=None):
     def get_storage_value_type(pallet, function):
+        if not substrate.metadata:
+            return None
         try:
             metadata_pallet = substrate.metadata.get_metadata_pallet(pallet)
             if metadata_pallet:
@@ -344,6 +346,8 @@ def initialize_wallet_cache(address):
                 return
         try:
             def get_storage_value_type(pallet, function):
+                if not substrate.metadata:
+                    return None
                 try:
                     metadata_pallet = substrate.metadata.get_metadata_pallet(pallet)
                     if metadata_pallet:
