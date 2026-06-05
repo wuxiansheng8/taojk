@@ -146,10 +146,7 @@ def _query_blockchain_data(dwellir_wss, address, netuid):
                         storage_keys = []
                         key_mapping = {}
                         
-                        alpha_type = get_storage_value_type("SubtensorModule", "Alpha")
                         alpha_v2_type = get_storage_value_type("SubtensorModule", "AlphaV2")
-                        stake_type = get_storage_value_type("SubtensorModule", "Stake")
-                        total_shares_type = get_storage_value_type("SubtensorModule", "TotalHotkeyShares")
                         total_shares_v2_type = get_storage_value_type("SubtensorModule", "TotalHotkeySharesV2")
                         total_alpha_type = get_storage_value_type("SubtensorModule", "TotalHotkeyAlpha")
                         
@@ -158,18 +155,6 @@ def _query_blockchain_data(dwellir_wss, address, netuid):
                             if not isinstance(hk_str, str):
                                 continue
                             
-                            if alpha_type:
-                                try:
-                                    k_alpha = StorageKey.create_from_storage_function(
-                                        "SubtensorModule", "Alpha", [hk_str, address, int(netuid)],
-                                        runtime_config=substrate.runtime_config,
-                                        metadata=substrate.metadata
-                                    ).to_hex()
-                                    storage_keys.append(k_alpha)
-                                    key_mapping[k_alpha] = (hk_str, "Alpha", alpha_type)
-                                except Exception:
-                                    pass
-                                    
                             if alpha_v2_type:
                                 try:
                                     k_alphav2 = StorageKey.create_from_storage_function(
@@ -179,18 +164,6 @@ def _query_blockchain_data(dwellir_wss, address, netuid):
                                     ).to_hex()
                                     storage_keys.append(k_alphav2)
                                     key_mapping[k_alphav2] = (hk_str, "AlphaV2", alpha_v2_type)
-                                except Exception:
-                                    pass
-
-                            if total_shares_type:
-                                try:
-                                    k_shares = StorageKey.create_from_storage_function(
-                                        "SubtensorModule", "TotalHotkeyShares", [hk_str, int(netuid)],
-                                        runtime_config=substrate.runtime_config,
-                                        metadata=substrate.metadata
-                                    ).to_hex()
-                                    storage_keys.append(k_shares)
-                                    key_mapping[k_shares] = (hk_str, "TotalShares", total_shares_type)
                                 except Exception:
                                     pass
 
@@ -217,26 +190,11 @@ def _query_blockchain_data(dwellir_wss, address, netuid):
                                     key_mapping[k_tot_alpha] = (hk_str, "TotalAlpha", total_alpha_type)
                                 except Exception:
                                     pass
-                                    
-                            if stake_type:
-                                try:
-                                    k_stake = StorageKey.create_from_storage_function(
-                                        "SubtensorModule", "Stake", [hk_str, address],
-                                        runtime_config=substrate.runtime_config,
-                                        metadata=substrate.metadata
-                                    ).to_hex()
-                                    storage_keys.append(k_stake)
-                                    key_mapping[k_stake] = (hk_str, "Stake", stake_type)
-                                except Exception:
-                                    pass
                         
                         chunk_size = 20
                         chunks = [storage_keys[i:i + chunk_size] for i in range(0, len(storage_keys), chunk_size)]
                         
                         hotkey_alpha_v2 = {}
-                        hotkey_alpha = {}
-                        hotkey_stake = {}
-                        hotkey_total_shares = {}
                         hotkey_total_shares_v2 = {}
                         hotkey_total_alpha = {}
 
@@ -265,12 +223,6 @@ def _query_blockchain_data(dwellir_wss, address, netuid):
                                             
                                             if storage_name == "AlphaV2":
                                                 hotkey_alpha_v2[hk_str] = val
-                                            elif storage_name == "Alpha":
-                                                hotkey_alpha[hk_str] = val
-                                            elif storage_name == "Stake":
-                                                hotkey_stake[hk_str] = val
-                                            elif storage_name == "TotalShares":
-                                                hotkey_total_shares[hk_str] = val
                                             elif storage_name == "TotalSharesV2":
                                                 hotkey_total_shares_v2[hk_str] = val
                                             elif storage_name == "TotalAlpha":
@@ -283,26 +235,14 @@ def _query_blockchain_data(dwellir_wss, address, netuid):
                                 continue
                             
                             val_v2_shares = hotkey_alpha_v2.get(hk_str, 0.0)
-                            val_v1_shares = hotkey_alpha.get(hk_str, 0.0)
-                            val_stake = hotkey_stake.get(hk_str, 0.0)
-                            
                             tot_shares_v2 = hotkey_total_shares_v2.get(hk_str, 0.0)
-                            tot_shares_v1 = hotkey_total_shares.get(hk_str, 0.0)
                             tot_alpha = hotkey_total_alpha.get(hk_str, 0.0)
                             
                             val_v2 = 0.0
                             if tot_shares_v2 > 0:
                                 val_v2 = (val_v2_shares / tot_shares_v2) * tot_alpha
-                                
-                            val_v1 = 0.0
-                            if tot_shares_v1 > 0:
-                                val_v1 = (val_v1_shares / tot_shares_v1) * tot_alpha
                             
-                            selected = val_v2 if val_v2 > 0 else val_v1
-                            if selected <= 0:
-                                selected = val_stake
-                            
-                            alpha_stake += selected / 1e9
+                            alpha_stake += val_v2 / 1e9
 
                     # D. 估算折算 TAO 金额
                     equivalent_tao = None
