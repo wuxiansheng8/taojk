@@ -534,3 +534,12 @@ def get_cache_stats():
         "record_count": record_count or 0,
         "db_size": db_size_str
     }
+
+def vacuum_db():
+    conn = get_db()
+    try:
+        conn.execute("VACUUM")
+    except Exception:
+        pass
+    finally:
+        conn.close()

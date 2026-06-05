@@ -590,6 +590,7 @@ def clear_non_monitored_cache(request: Request, csrf_token: str = Form(...)):
     def operation(conn):
         conn.execute("DELETE FROM wallets_cache WHERE address NOT IN (SELECT address FROM wallets)")
     db.execute_write_returning(operation)
+    db.vacuum_db()
     return {"ok": True}
 
 if __name__ == "__main__":
