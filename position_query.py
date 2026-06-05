@@ -11,6 +11,7 @@ QUERY_IO_LOCK = threading.Lock()
 QUERY_HEARTBEAT_STARTED = False
 
 def query_heartbeat_loop():
+    global QUERY_SUBSTRATE
     while True:
         time.sleep(30)
         if QUERY_SUBSTRATE is None:
