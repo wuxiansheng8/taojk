@@ -8,6 +8,38 @@ import database as db
 QUERY_SUBSTRATE = None
 QUERY_SUBSTRATE_LOCK = threading.Lock()
 QUERY_IO_LOCK = threading.Lock()
+QUERY_HEARTBEAT_STARTED = False
+
+def query_heartbeat_loop():
+    while True:
+        time.sleep(30)
+        if QUERY_SUBSTRATE is None:
+            continue
+        try:
+            with QUERY_IO_LOCK:
+                if QUERY_SUBSTRATE is None:
+                    continue
+                QUERY_SUBSTRATE.get_chain_head()
+        except Exception as e:
+            with QUERY_SUBSTRATE_LOCK:
+                if QUERY_SUBSTRATE is not None:
+                    db.add_log("WARN", f"常驻查询连接心跳检测失败: {str(e)}")
+                    try:
+                        QUERY_SUBSTRATE.close()
+                    except:
+                        pass
+                    QUERY_SUBSTRATE = None
+
+def start_query_heartbeat():
+    global QUERY_HEARTBEAT_STARTED
+    if not QUERY_HEARTBEAT_STARTED:
+        with QUERY_SUBSTRATE_LOCK:
+            if not QUERY_HEARTBEAT_STARTED:
+                t = threading.Thread(target=query_heartbeat_loop, daemon=True)
+                t.start()
+                QUERY_HEARTBEAT_STARTED = True
+                db.add_log("INFO", "常驻查询连接心跳守护线程已启动。")
+
 
 def extract_numeric_value(obj):
     if obj is None:
@@ -67,6 +99,7 @@ def get_query_substrate(dwellir_wss=None):
                         new_sub.get_chain_head()
                         QUERY_SUBSTRATE = new_sub
                         db.add_log("INFO", f"已成功初始化常驻余额查询长连接: {url}")
+                        start_query_heartbeat()
                         break
                     except Exception as e:
                         db.add_log("WARN", f"尝试使用 {url} 初始化常驻余额查询长连接失败: {str(e)}")
@@ -91,6 +124,7 @@ def get_query_substrate(dwellir_wss=None):
                         new_sub.get_chain_head()
                         QUERY_SUBSTRATE = new_sub
                         db.add_log("INFO", f"重建常驻余额查询长连接成功: {url}")
+                        start_query_heartbeat()
                         break
                     except Exception as e:
                         db.add_log("WARN", f"尝试使用 {url} 重建常驻余额查询长连接失败: {str(e)}")
