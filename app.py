@@ -38,7 +38,30 @@ async def lifespan(app: FastAPI):
     # 启动扫描线程
     threading.Thread(target=scanner.start_scanner, daemon=True).start()
     
+    # 自动为数据库中存在但没有缓存的钱包进行后台初始化
+    def auto_init_missing_caches():
+        time.sleep(5)  # 等待扫描器与 WSS 准备就绪
+        try:
+            conn = db.get_db()
+            missing_wallets = conn.execute("""
+                SELECT DISTINCT w.address 
+                FROM wallets w
+                WHERE w.is_active = 1
+                  AND w.address NOT IN (SELECT DISTINCT address FROM wallets_cache)
+            """).fetchall()
+            conn.close()
+            
+            if missing_wallets:
+                db.add_log("INFO", f"启动自检：发现 {len(missing_wallets)} 个监控钱包缺失本地持仓缓存，开始后台批量初始化...")
+                for row in missing_wallets:
+                    addr = row["address"]
+                    position_query.initialize_wallet_cache(addr)
+                    time.sleep(1)  # 稍微控制频次，避免 RPC 节点限频
+                db.add_log("INFO", "启动自检：缺失的钱包持仓缓存初始化队列执行完毕。")
+        except Exception as e:
+            db.add_log("ERROR", f"启动自检初始化缓存失败: {str(e)}")
 
+    threading.Thread(target=auto_init_missing_caches, daemon=True).start()
     
     yield
     
@@ -532,6 +555,8 @@ def import_wallets(request: Request, file: UploadFile = File(...), csrf_token: s
     text = raw.decode("utf-8")
     parsed_groups = parse_wallet_txt(text)
 
+    addresses_to_init = set()
+
     def operation(conn):
         for parsed_group in parsed_groups:
             existing_group = conn.execute(
@@ -548,9 +573,11 @@ def import_wallets(request: Request, file: UploadFile = File(...), csrf_token: s
                 group_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
             for wallet in parsed_group["wallets"]:
+                addr = wallet["address"].strip()
+                addresses_to_init.add(addr)
                 existing_wallet = conn.execute(
                     "SELECT id FROM wallets WHERE group_id = ? AND address = ?",
-                    (group_id, wallet["address"])
+                    (group_id, addr)
                 ).fetchone()
                 if existing_wallet:
                     conn.execute(
@@ -560,8 +587,16 @@ def import_wallets(request: Request, file: UploadFile = File(...), csrf_token: s
                 else:
                     conn.execute(
                         "INSERT INTO wallets (group_id, address, alias) VALUES (?, ?, ?)",
-                        (group_id, wallet["address"], wallet["alias"])
+                        (group_id, addr, wallet["alias"])
                     )
+
+    db.execute_write_returning(operation)
+    
+    # 后台线程异步批量初始化这些导入的钱包缓存
+    for addr in addresses_to_init:
+        threading.Thread(target=position_query.initialize_wallet_cache, args=(addr,), daemon=True).start()
+
+    return RedirectResponse("/monitoring", status_code=303)
 
 def extract_numeric_value(obj):
     """提取 Substrate 节点返回数据中各种嵌套类型的数值 (兼容 dict/SafeFloat/U64/ScaleObj 等)"""
