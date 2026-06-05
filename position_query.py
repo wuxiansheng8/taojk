@@ -6,7 +6,7 @@ from scalecodec.base import ScaleBytes
 import database as db
 
 QUERY_SUBSTRATE = None
-QUERY_SUBSTRATE_LOCK = threading.Lock()
+QUERY_SUBSTRATE_LOCK = threading.RLock()
 QUERY_IO_LOCK = threading.Lock()
 QUERY_HEARTBEAT_STARTED = False
 
